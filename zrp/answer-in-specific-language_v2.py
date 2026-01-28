@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 BASE_URL_API = "https://openrouter.ai/api/v1"
 BASE_URL_LOCAL = "http://localhost:8000/v1"
 TEMPERATURE = 0.2
-TIMEOUT = 180  # Increased timeout for local models which may be slower
+TIMEOUT =   # Increased timeout for local models which may be slower
 MAX_WORKERS = 10  # Reduced default workers for local models to avoid overwhelming the server
 NUM_ROUNDS = 3
 LANGUAGES = ["EN", "ZH", "MS", "TH"]
@@ -404,8 +404,13 @@ def load_checkpoint(
                 if not pid:
                     continue
                 key = (pid, lang, r)
-                completed.add(key)
-                existing_results[lang][r].append(rec)
+                # Only mark as completed if successful (no error)
+                # Failed tasks will be retried on next run
+                if not rec.get("error"):
+                    completed.add(key)
+                    existing_results[lang][r].append(rec)
+                else:
+                    logger.info("Found failed task to retry: %s/%s/round%s", pid[:8], lang, r)
     return completed, existing_results
 
 
