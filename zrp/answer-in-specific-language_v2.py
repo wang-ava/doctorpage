@@ -40,12 +40,15 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------
 
 BASE_URL_API = "https://openrouter.ai/api/v1"
-BASE_URL_LOCAL = "http://localhost:8000/v1"
+BASE_URL_LOCAL = "http://localhost:8001/v1"
 TEMPERATURE = 0.2
-TIMEOUT = 180 # Increased timeout for local models which may be slower
-MAX_WORKERS = 10  # Reduced default workers for local models to avoid overwhelming the server
+TIMEOUT = 180  # Increased timeout for local models which may be slower
+MAX_WORKERS = (
+    10  # Reduced default workers for local models to avoid overwhelming the server
+)
 NUM_ROUNDS = 3
-LANGUAGES = ["EN", "ZH", "MS", "TH"]
+# LANGUAGES = ["EN", "ZH", "MS", "TH"]
+LANGUAGES = ["EN", "ZH", "MS"]
 
 # Language code -> (translation filename suffix, messages key)
 # EN uses English dataset "prompt"; others use {lang}_translation.jsonl "translation"
@@ -53,7 +56,7 @@ LANG_CONFIG = {
     "EN": ("english_only", "prompt"),  # special: from English sample
     "ZH": ("chinese_translation", "translation"),
     "MS": ("malay_translation", "translation"),
-    "TH": ("thai_translation", "translation"),
+    # "TH": ("thai_translation", "translation"),
 }
 
 
@@ -132,7 +135,9 @@ def load_english_cases(path: Path) -> Dict[str, List[Dict[str, str]]]:
     return by_id
 
 
-def load_translation_by_id(path: Path, messages_key: str) -> Dict[str, List[Dict[str, str]]]:
+def load_translation_by_id(
+    path: Path, messages_key: str
+) -> Dict[str, List[Dict[str, str]]]:
     """Load translation JSONL; return dict prompt_id -> messages (e.g. 'translation')."""
     rows = load_jsonl(path)
     by_id = {}
@@ -157,8 +162,16 @@ def build_aligned_cases(
     Returns (ordered_ids, id -> {lang -> messages}).
     Only includes cases present in all four sources.
     """
-    en_path = base_dir / english_path if not english_path.is_absolute() else Path(english_path)
-    trans_dir = base_dir / translation_dir if not translation_dir.is_absolute() else Path(translation_dir)
+    en_path = (
+        base_dir / english_path
+        if not english_path.is_absolute()
+        else Path(english_path)
+    )
+    trans_dir = (
+        base_dir / translation_dir
+        if not translation_dir.is_absolute()
+        else Path(translation_dir)
+    )
 
     en_by_id = load_english_cases(en_path)
     ordered_ids = list(en_by_id.keys())
@@ -167,13 +180,14 @@ def build_aligned_cases(
 
     # Load translation files for ZH, MS, TH
     trans_by_lang = {}
-    for lang in ["ZH", "MS", "TH"]:
+    # for lang in ["ZH", "MS", "TH"]:
+    for lang in ["ZH", "MS"]:
         if lang == "ZH":
             p = trans_dir / "chinese_translation.jsonl"
         elif lang == "MS":
             p = trans_dir / "malay_translation.jsonl"
-        else:
-            p = trans_dir / "thai_translation.jsonl"
+        # else:
+        #     p = trans_dir / "thai_translation.jsonl"
         if not p.exists():
             logger.warning("Translation file not found: %s", p)
             trans_by_lang[lang] = {}
@@ -185,7 +199,8 @@ def build_aligned_cases(
     for pid in ordered_ids:
         entry = {"EN": en_by_id[pid]}
         ok = True
-        for lang in ["ZH", "MS", "TH"]:
+        # for lang in ["ZH", "MS", "TH"]:
+        for lang in ["ZH", "MS"]:
             if pid not in trans_by_lang.get(lang, {}):
                 ok = False
                 break
@@ -204,7 +219,12 @@ def _coerce_usage(usage_obj: Any) -> Dict[str, int]:
     Handles OpenAI/OpenRouter shapes and completion_tokens_details.reasoning_tokens.
     """
     if usage_obj is None:
-        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "reasoning_tokens": 0}
+        return {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+        }
 
     def get_reasoning(d: Any) -> int:
         if d is None:
@@ -218,28 +238,57 @@ def _coerce_usage(usage_obj: Any) -> Dict[str, int]:
         ot = usage_obj.get("completion_tokens") or usage_obj.get("output_tokens") or 0
         tt = usage_obj.get("total_tokens") or (it + ot)
         det = usage_obj.get("completion_tokens_details") or {}
-        return {"input_tokens": int(it or 0), "output_tokens": int(ot or 0), "total_tokens": int(tt or 0), "reasoning_tokens": get_reasoning(det)}
+        return {
+            "input_tokens": int(it or 0),
+            "output_tokens": int(ot or 0),
+            "total_tokens": int(tt or 0),
+            "reasoning_tokens": get_reasoning(det),
+        }
 
     try:
-        ud = usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else {
-            "prompt_tokens": getattr(usage_obj, "prompt_tokens", None),
-            "completion_tokens": getattr(usage_obj, "completion_tokens", None),
-            "total_tokens": getattr(usage_obj, "total_tokens", None),
-            "input_tokens": getattr(usage_obj, "input_tokens", None),
-            "output_tokens": getattr(usage_obj, "output_tokens", None),
-            "completion_tokens_details": getattr(usage_obj, "completion_tokens_details", None),
-        }
+        ud = (
+            usage_obj.model_dump()
+            if hasattr(usage_obj, "model_dump")
+            else {
+                "prompt_tokens": getattr(usage_obj, "prompt_tokens", None),
+                "completion_tokens": getattr(usage_obj, "completion_tokens", None),
+                "total_tokens": getattr(usage_obj, "total_tokens", None),
+                "input_tokens": getattr(usage_obj, "input_tokens", None),
+                "output_tokens": getattr(usage_obj, "output_tokens", None),
+                "completion_tokens_details": getattr(
+                    usage_obj, "completion_tokens_details", None
+                ),
+            }
+        )
         it = ud.get("prompt_tokens") or ud.get("input_tokens") or 0
         ot = ud.get("completion_tokens") or ud.get("output_tokens") or 0
         tt = ud.get("total_tokens") or (it + ot)
         det = ud.get("completion_tokens_details")
-        return {"input_tokens": int(it or 0), "output_tokens": int(ot or 0), "total_tokens": int(tt or 0), "reasoning_tokens": get_reasoning(det)}
+        return {
+            "input_tokens": int(it or 0),
+            "output_tokens": int(ot or 0),
+            "total_tokens": int(tt or 0),
+            "reasoning_tokens": get_reasoning(det),
+        }
     except Exception:
-        it = int(getattr(usage_obj, "prompt_tokens", 0) or getattr(usage_obj, "input_tokens", 0) or 0)
-        ot = int(getattr(usage_obj, "completion_tokens", 0) or getattr(usage_obj, "output_tokens", 0) or 0)
+        it = int(
+            getattr(usage_obj, "prompt_tokens", 0)
+            or getattr(usage_obj, "input_tokens", 0)
+            or 0
+        )
+        ot = int(
+            getattr(usage_obj, "completion_tokens", 0)
+            or getattr(usage_obj, "output_tokens", 0)
+            or 0
+        )
         tt = int(getattr(usage_obj, "total_tokens", 0) or (it + ot))
         det = getattr(usage_obj, "completion_tokens_details", None)
-        return {"input_tokens": it, "output_tokens": ot, "total_tokens": tt, "reasoning_tokens": get_reasoning(det)}
+        return {
+            "input_tokens": it,
+            "output_tokens": ot,
+            "total_tokens": tt,
+            "reasoning_tokens": get_reasoning(det),
+        }
 
 
 def run_one_completion(
@@ -275,59 +324,97 @@ def run_one_completion(
             # Extract more detailed error information
             err = str(e)
             err_type = type(e).__name__
-            
+
             # Try to get more detailed error information from OpenAI exceptions
-            if hasattr(e, 'message'):
+            if hasattr(e, "message"):
                 err = str(e.message) if e.message else err
-            elif hasattr(e, 'body'):
+            elif hasattr(e, "body"):
                 try:
                     if isinstance(e.body, dict):
-                        err_detail = e.body.get('error', {}).get('message', '')
+                        err_detail = e.body.get("error", {}).get("message", "")
                         if err_detail:
                             err = f"{err} | {err_detail}"
                 except:
                     pass
-            
+
             # Try to get cause information
-            if hasattr(e, '__cause__') and e.__cause__:
+            if hasattr(e, "__cause__") and e.__cause__:
                 cause_str = str(e.__cause__)
                 if cause_str and cause_str not in err:
                     err = f"{err} (cause: {cause_str})"
-            
+
             # Build comprehensive error message
             full_err_msg = f"{err_type}: {err}"
-            
+
             # Log more details for connection errors - but only on first attempt to avoid spam
             is_connection_error = (
-                "Connection" in err or 
-                "connection" in err.lower() or 
-                "refused" in err.lower() or 
-                "timeout" in err.lower() or
-                "unreachable" in err.lower() or
-                "network" in err.lower() or
-                err_type == "APIConnectionError" or
-                err_type == "TimeoutError" or
-                err_type == "ConnectionError"
+                "Connection" in err
+                or "connection" in err.lower()
+                or "refused" in err.lower()
+                or "timeout" in err.lower()
+                or "unreachable" in err.lower()
+                or "network" in err.lower()
+                or err_type == "APIConnectionError"
+                or err_type == "TimeoutError"
+                or err_type == "ConnectionError"
             )
-            
+
             if is_connection_error:
                 if attempt == 0:  # Only log on first attempt
-                    logger.warning("Connection error on attempt %s/%s: %s", attempt + 1, max_retries, full_err_msg)
-                    logger.warning("Server: %s, Model: %s", client.base_url if hasattr(client, 'base_url') else "localhost:8000", model)
+                    logger.warning(
+                        "Connection error on attempt %s/%s: %s",
+                        attempt + 1,
+                        max_retries,
+                        full_err_msg,
+                    )
+                    logger.warning(
+                        "Server: %s, Model: %s",
+                        (
+                            client.base_url
+                            if hasattr(client, "base_url")
+                            else "localhost:8000"
+                        ),
+                        model,
+                    )
             else:
                 if attempt == 0:  # Only log on first attempt
-                    logger.warning("API error on attempt %s/%s: %s", attempt + 1, max_retries, full_err_msg)
-            
+                    logger.warning(
+                        "API error on attempt %s/%s: %s",
+                        attempt + 1,
+                        max_retries,
+                        full_err_msg,
+                    )
+
             if attempt + 1 >= max_retries:
                 # On final failure, return the full error message
-                return "", full_err_msg, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "reasoning_tokens": 0}, elapsed
-            
+                return (
+                    "",
+                    full_err_msg,
+                    {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "reasoning_tokens": 0,
+                    },
+                    elapsed,
+                )
+
             # Exponential backoff with jitter
             wait_time = 1.5 ** (attempt + 1) + (attempt * 0.1)
             if attempt == max_retries - 2:  # Last retry, wait a bit longer
                 wait_time *= 1.5
             time.sleep(wait_time)
-    return "", "max_retries exceeded", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "reasoning_tokens": 0}, 0.0
+    return (
+        "",
+        "max_retries exceeded",
+        {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+        },
+        0.0,
+    )
 
 
 def process_task(
@@ -410,7 +497,9 @@ def load_checkpoint(
                     completed.add(key)
                     existing_results[lang][r].append(rec)
                 else:
-                    logger.info("Found failed task to retry: %s/%s/round%s", pid[:8], lang, r)
+                    logger.info(
+                        "Found failed task to retry: %s/%s/round%s", pid[:8], lang, r
+                    )
     return completed, existing_results
 
 
@@ -537,24 +626,41 @@ def main() -> None:
 
     api_key = args.api_key
     if not api_key:
-        api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get(
+            "OPENAI_API_KEY"
+        )
     if args.mode == "api" and not api_key:
-        raise ValueError("For --mode api, set OPENROUTER_API_KEY or OPENAI_API_KEY or --api-key")
+        raise ValueError(
+            "For --mode api, set OPENROUTER_API_KEY or OPENAI_API_KEY or --api-key"
+        )
 
     base_url = args.base_url
     if base_url is None:
         base_url = BASE_URL_API if args.mode == "api" else BASE_URL_LOCAL
 
-    model = args.model
-
     # If user didn't override --model and is using api mode, switch to a sensible api default.
     if args.mode == "api" and args.model is None:
         args.model = "google/gemini-3-pro-preview"
-    
-    if args.mode == "local" and args.model is None:
-        raise ValueError("For --mode local, please specify --model (e.g.,  --model \"OpenGVLab/InternVL2-8B\")")
 
-    client = OpenAI(api_key=api_key or "dummy", base_url=base_url)
+    if args.mode == "local" and args.model is None:
+        raise ValueError(
+            'For --mode local, please specify --model (e.g.,  --model "OpenGVLab/InternVL2-8B")'
+        )
+
+    model = args.model
+
+    if args.mode == "local":
+        client = OpenAI(api_key=api_key or "dummy", base_url=base_url, max_retries=0)
+    else:
+        client = OpenAI(api_key=api_key or "dummy", base_url=base_url)
+
+    try:
+        logger.info(
+            "OpenAI client max_retries=%s", getattr(client, "max_retries", None)
+        )
+    except Exception:
+        logger.info("Could not read client max_retries")
+
     temp = args.temperature
     timeout = args.timeout
 
@@ -562,24 +668,35 @@ def main() -> None:
     if args.mode == "local":
         max_workers = min(args.max_workers, 15)
         if timeout < 60:
-            logger.warning("Timeout is %s seconds. For local models, consider using at least 60-120 seconds.", timeout)
+            logger.warning(
+                "Timeout is %s seconds. For local models, consider using at least 60-120 seconds.",
+                timeout,
+            )
     else:
         max_workers = min(args.max_workers, 25)
-    
+
     if not isinstance(args.rounds, int) or args.rounds < 1:
         raise ValueError("--rounds must be a positive integer")
     num_rounds = max(1, min(3, args.rounds))
 
     languages = [l.upper() for l in args.languages]
 
-    logger.info("base_dir=%s mode=%s model=%s base_url=%s workers=%s rounds=%s langs=%s",
-                base_dir, args.mode, model, base_url, max_workers, num_rounds, languages)
-    
+    logger.info(
+        "base_dir=%s mode=%s model=%s base_url=%s workers=%s rounds=%s langs=%s",
+        base_dir,
+        args.mode,
+        model,
+        base_url,
+        max_workers,
+        num_rounds,
+        languages,
+    )
+
     # Check server connectivity for local mode
     if args.mode == "local":
         try:
             # Try to connect to the server
-            test_url = base_url + '/models'
+            test_url = base_url + "/models"
             logger.info("Checking server connectivity at %s...", test_url)
             resp = requests.get(test_url, timeout=5)
             if resp.status_code == 200:
@@ -590,13 +707,22 @@ def main() -> None:
                     """
                     {'object': 'list', 'data': [{'id': 'OpenGVLab/InternVL2-8B', 'object': 'model', 'created': 1769600653, 'owned_by': 'vllm', 'root': 'OpenGVLab/InternVL2-8B', 'parent': None, 'max_model_len': 65536, 'permission': [{'id': 'modelperm-a9b0760e5019f601', 'object': 'model_permission', 'created': 1769600653, 'allow_create_engine': False, 'allow_sampling': True, 'allow_logprobs': True, 'allow_search_indices': False, 'allow_view': True, 'allow_fine_tuning': False, 'organization': '*', 'group': None, 'is_blocking': False}]}]}
                     """
-                    if 'data' in models_data:
-                        model_ids = [m.get('id', 'unknown') for m in models_data.get('data', [])]
-                        logger.info("Available models: %s", ', '.join(model_ids) if model_ids else 'none')
+                    if "data" in models_data:
+                        model_ids = [
+                            m.get("id", "unknown") for m in models_data.get("data", [])
+                        ]
+                        logger.info(
+                            "Available models: %s",
+                            ", ".join(model_ids) if model_ids else "none",
+                        )
                 except:
                     pass
             else:
-                logger.error("✗ Local server returned status %s at %s", resp.status_code, base_url)
+                logger.error(
+                    "✗ Local server returned status %s at %s",
+                    resp.status_code,
+                    base_url,
+                )
                 raise ConnectionError(f"Server returned status {resp.status_code}")
         except requests.exceptions.ConnectionError as e:
             logger.error("=" * 60)
@@ -606,16 +732,22 @@ def main() -> None:
             logger.error("")
             logger.error("To fix this, start your model server first:")
             logger.error("  Example with vLLM (using GPU 2,3):")
-            logger.error("    CUDA_VISIBLE_DEVICES=2,3 vllm serve OpenGVLab/InternVL2-8B --port 8000")
+            logger.error(
+                "    CUDA_VISIBLE_DEVICES=2,3 vllm serve OpenGVLab/InternVL2-8B --port 8000"
+            )
             logger.error("  Example with llama.cpp: ./server -m model.gguf --port 8000")
             logger.error("  Or use your OpenAI-compatible server")
             logger.error("")
-            logger.error("Note: To use specific GPUs (e.g., 2,3), set CUDA_VISIBLE_DEVICES=2,3")
+            logger.error(
+                "Note: To use specific GPUs (e.g., 2,3), set CUDA_VISIBLE_DEVICES=2,3"
+            )
             logger.error("      before starting the server.")
             logger.error("")
             logger.error("Then run this script again.")
             logger.error("=" * 60)
-            raise ConnectionError(f"Local server not accessible at {base_url}. Please start your model server first.") from e
+            raise ConnectionError(
+                f"Local server not accessible at {base_url}. Please start your model server first."
+            ) from e
         except Exception as e:
             logger.error("Could not verify server connectivity: %s", e)
             raise ConnectionError(f"Server check failed: {e}") from e
@@ -632,7 +764,10 @@ def main() -> None:
     if not args.no_resume:
         completed, existing_results = load_checkpoint(out_root, languages, num_rounds)
         if completed:
-            logger.info("Resume: loaded %s completed (prompt_id, lang, round) from checkpoint", len(completed))
+            logger.info(
+                "Resume: loaded %s completed (prompt_id, lang, round) from checkpoint",
+                len(completed),
+            )
 
     ordered_ids, aligned = build_aligned_cases(
         base_dir,
@@ -641,7 +776,7 @@ def main() -> None:
     )
 
     if args.limit is not None and args.limit > 0:
-        ordered_ids = ordered_ids[:args.limit]
+        ordered_ids = ordered_ids[: args.limit]
         aligned = {k: v for k, v in aligned.items() if k in ordered_ids}
 
     logger.info("Aligned %s cases across EN + ZH/MS/TH", len(ordered_ids))
@@ -653,15 +788,19 @@ def main() -> None:
         for pid in ordered_ids:
             for lang in languages:
                 lang_pids[lang].append(pid)
-        
+
         # Limit each language to N prompt_ids
         limited_pids = set()
         for lang in languages:
-            limited = lang_pids[lang][:args.limit_per_language]
+            limited = lang_pids[lang][: args.limit_per_language]
             limited_pids.update(limited)
-            logger.info("Language %s: limited to %s cases (from %s available)", 
-                       lang, len(limited), len(lang_pids[lang]))
-        
+            logger.info(
+                "Language %s: limited to %s cases (from %s available)",
+                lang,
+                len(limited),
+                len(lang_pids[lang]),
+            )
+
         # Filter ordered_ids and aligned to only include limited prompt_ids
         ordered_ids = [pid for pid in ordered_ids if pid in limited_pids]
         aligned = {k: v for k, v in aligned.items() if k in limited_pids}
@@ -673,32 +812,48 @@ def main() -> None:
         for lang in languages:
             messages = aligned[pid][lang]
             for r in range(1, num_rounds + 1):
-                tasks_all.append({
-                    "prompt_id": pid,
-                    "language": lang,
-                    "round": r,
-                    "messages": messages,
-                })
-    tasks = [t for t in tasks_all if (t["prompt_id"], t["language"], t["round"]) not in completed]
-    logger.info("Total tasks: %s (%s to run, %s skipped)", len(tasks_all), len(tasks), len(tasks_all) - len(tasks))
+                tasks_all.append(
+                    {
+                        "prompt_id": pid,
+                        "language": lang,
+                        "round": r,
+                        "messages": messages,
+                    }
+                )
+    tasks = [
+        t
+        for t in tasks_all
+        if (t["prompt_id"], t["language"], t["round"]) not in completed
+    ]
+    logger.info(
+        "Total tasks: %s (%s to run, %s skipped)",
+        len(tasks_all),
+        len(tasks),
+        len(tasks_all) - len(tasks),
+    )
 
     # Final server check before starting tasks (for local mode)
     if args.mode == "local" and tasks:
         if requests is not None:
             try:
-                test_url = base_url.rstrip('/v1') + '/v1/models'
+                test_url = base_url.removesuffix("/v1") + "/v1/models"
                 resp = requests.get(test_url, timeout=3)
                 if resp.status_code == 200:
                     logger.info("✓ Server is ready. Starting task processing...")
                 else:
-                    logger.error("✗ Server returned status %s. Please check your server.", resp.status_code)
+                    logger.error(
+                        "✗ Server returned status %s. Please check your server.",
+                        resp.status_code,
+                    )
             except Exception as e:
                 logger.error("=" * 60)
                 logger.error("✗ Cannot connect to server before starting tasks!")
                 logger.error("Error: %s", str(e))
                 logger.error("")
                 logger.error("Please ensure your server is running:")
-                logger.error("  CUDA_VISIBLE_DEVICES=2,3 vllm serve models/internvl2-8b --port 8000")
+                logger.error(
+                    "  CUDA_VISIBLE_DEVICES=2,3 vllm serve models/internvl2-8b --port 8000"
+                )
                 logger.error("")
                 logger.error("Then run this script again.")
                 logger.error("=" * 60)
@@ -706,9 +861,13 @@ def main() -> None:
 
     if not tasks:
         logger.info("Nothing to run. Use --no-resume to start fresh.")
-        save_checkpoint(out_root, languages, num_rounds, existing_results, {
-            lang: {r: [] for r in range(1, num_rounds + 1)} for lang in languages
-        })
+        save_checkpoint(
+            out_root,
+            languages,
+            num_rounds,
+            existing_results,
+            {lang: {r: [] for r in range(1, num_rounds + 1)} for lang in languages},
+        )
         logger.info("Done. Results under %s", out_root)
         return
 
@@ -727,43 +886,77 @@ def main() -> None:
             n = done_count[0]
             # Log errors for debugging
             if rec.get("error"):
-                logger.warning("Task failed: prompt_id=%s, lang=%s, round=%s, error=%s", 
-                             rec["prompt_id"], rec["language"], rec["round"], rec["error"][:100])
+                logger.warning(
+                    "Task failed: prompt_id=%s, lang=%s, round=%s, error=%s",
+                    rec["prompt_id"],
+                    rec["language"],
+                    rec["round"],
+                    rec["error"][:100],
+                )
             if n % checkpoint_interval == 0:
-                save_checkpoint(out_root, languages, num_rounds, existing_results, results_by_lang_round)
+                save_checkpoint(
+                    out_root,
+                    languages,
+                    num_rounds,
+                    existing_results,
+                    results_by_lang_round,
+                )
                 # Log progress with error count
-                error_count = sum(1 for lang_dict in results_by_lang_round.values() 
-                                for round_list in lang_dict.values() 
-                                for r in round_list if r.get("error"))
-                logger.info("Progress: %s/%s tasks completed (%s errors)", n, len(tasks), error_count)
+                error_count = sum(
+                    1
+                    for lang_dict in results_by_lang_round.values()
+                    for round_list in lang_dict.values()
+                    for r in round_list
+                    if r.get("error")
+                )
+                logger.info(
+                    "Progress: %s/%s tasks completed (%s errors)",
+                    n,
+                    len(tasks),
+                    error_count,
+                )
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = [ex.submit(run_and_store, t) for t in tasks]
         # Use tqdm progress bar with ETA
-        with tqdm(total=len(tasks), desc="Processing", unit="task",
-                  bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]") as pbar:
+        with tqdm(
+            total=len(tasks),
+            desc="Processing",
+            unit="task",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+        ) as pbar:
             for _ in as_completed(futs):
                 pbar.update(1)
 
-    save_checkpoint(out_root, languages, num_rounds, existing_results, results_by_lang_round)
-    
+    save_checkpoint(
+        out_root, languages, num_rounds, existing_results, results_by_lang_round
+    )
+
     # Final statistics
-    total_completed = sum(len(round_list) 
-                         for lang_dict in results_by_lang_round.values() 
-                         for round_list in lang_dict.values())
-    total_errors = sum(1 
-                      for lang_dict in results_by_lang_round.values() 
-                      for round_list in lang_dict.values() 
-                      for r in round_list if r.get("error"))
+    total_completed = sum(
+        len(round_list)
+        for lang_dict in results_by_lang_round.values()
+        for round_list in lang_dict.values()
+    )
+    total_errors = sum(
+        1
+        for lang_dict in results_by_lang_round.values()
+        for round_list in lang_dict.values()
+        for r in round_list
+        if r.get("error")
+    )
     total_success = total_completed - total_errors
-    
+
     logger.info("=" * 60)
     logger.info("Final Statistics:")
     logger.info("  Total tasks completed: %s", total_completed)
     logger.info("  Successful: %s", total_success)
     logger.info("  Failed: %s", total_errors)
     if total_errors > 0:
-        logger.warning("  Error rate: %.1f%%", (total_errors / total_completed * 100) if total_completed > 0 else 0)
+        logger.warning(
+            "  Error rate: %.1f%%",
+            (total_errors / total_completed * 100) if total_completed > 0 else 0,
+        )
         logger.warning("  Check the result files for detailed error messages")
     logger.info("=" * 60)
     logger.info("Done. Results under %s", out_root)
