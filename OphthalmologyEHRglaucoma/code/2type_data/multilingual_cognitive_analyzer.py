@@ -19,6 +19,7 @@ Core capabilities:
 
 import json
 import argparse
+import copy
 from pathlib import Path
 from typing import Dict, List, Tuple, Set, Optional
 from collections import defaultdict, Counter
@@ -169,6 +170,28 @@ class CompetitiveConfusionDetector:
 # 3. Diagnosis stratifier
 # ==========================================
 
+# Dataset numeric diagnosis schema used for disease-stratified analysis/plots.
+DIAGNOSIS_CODE_TO_CATEGORY = {
+    0: 'diag_0_not_glaucoma',
+    1: 'diag_1_pacs',
+    2: 'diag_2_pac',
+    3: 'diag_3_pacg',
+    4: 'diag_4_apac',
+    5: 'diag_5_poag',
+    6: 'diag_6_secondary_glaucoma',
+}
+DIAGNOSIS_CATEGORY_ORDER = [DIAGNOSIS_CODE_TO_CATEGORY[i] for i in [0, 1, 2, 3, 4, 5, 6]]
+DIAGNOSIS_CATEGORY_DISPLAY = {
+    'diag_0_not_glaucoma': '0=Not glaucoma',
+    'diag_1_pacs': '1=PACS',
+    'diag_2_pac': '2=PAC',
+    'diag_3_pacg': '3=PACG',
+    'diag_4_apac': '4=APAC',
+    'diag_5_poag': '5=POAG',
+    'diag_6_secondary_glaucoma': '6=Secondary glaucoma',
+}
+
+
 class DiagnosisStratifier:
     """Stratify results by diagnosis type and compute per-group metrics."""
     
@@ -181,15 +204,7 @@ class DiagnosisStratifier:
             'postoperative': r'H40\.7[0-9]',
         }
         # Numeric code schema used by this dataset.
-        self.numeric_categories = {
-            0: 'code_0_non_glaucoma_or_cataract',
-            1: 'code_1_pacs_or_pac',
-            2: 'code_2_pac',
-            3: 'code_3_pacg',
-            4: 'code_4_apac',
-            5: 'code_5_other_primary',
-            6: 'code_6_secondary_angle_closure',
-        }
+        self.numeric_categories = dict(DIAGNOSIS_CODE_TO_CATEGORY)
         self.stats_by_category = defaultdict(lambda: {
             'total': 0, 'correct': 0, 
             'avg_prob': [], 'avg_entropy': [],
@@ -318,6 +333,11 @@ CONCLUSION_CODE_FIELD_KEYS = ['诊断代码', 'diagnosis_code', 'kod_diagnosis',
 ENGLISH_AS_REFERENCE_LINE = True
 DISPLAY_LANGUAGES_EXCLUDE = ['English']
 RED_LINE_LABEL = 'reasoning in target language'
+LANGUAGE_LABEL_COLORS = {
+    'Chinese': '#9B59B6',  # purple
+    'Malay': '#3498DB',    # blue
+    'Thai': '#27AE60',     # green
+}
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -894,6 +914,12 @@ def analyze_dataset_v2(results: List[Dict], language: str) -> Dict:
         'total_samples': len(results),
         'correct_samples': 0,
         'incorrect_samples': 0,
+        'correct_samples_right_eye': 0,
+        'correct_samples_left_eye': 0,
+        'correct_samples_any_eye': 0,
+        'evaluated_samples_right_eye': 0,
+        'evaluated_samples_left_eye': 0,
+        'evaluated_samples_any_eye': 0,
         
         # Base metrics.
         'all_probs': [],
@@ -934,9 +960,30 @@ def analyze_dataset_v2(results: List[Dict], language: str) -> Dict:
     for sample_idx, result in enumerate(results):
         # Diagnosis correctness.
         pred, gt = extract_diagnosis_codes(result)
-        is_correct = (pred.get('OD') == gt.get('OD') and 
-                      pred.get('OS') == gt.get('OS') and 
-                      pred.get('OD') is not None)
+        pred_od = pred.get('OD')
+        pred_os = pred.get('OS')
+        gt_od = gt.get('OD')
+        gt_os = gt.get('OS')
+
+        od_evaluable = gt_od is not None
+        os_evaluable = gt_os is not None
+        if od_evaluable:
+            stats['evaluated_samples_right_eye'] += 1
+        if os_evaluable:
+            stats['evaluated_samples_left_eye'] += 1
+        if od_evaluable or os_evaluable:
+            stats['evaluated_samples_any_eye'] += 1
+
+        od_correct = bool(od_evaluable and pred_od == gt_od and pred_od is not None)
+        os_correct = bool(os_evaluable and pred_os == gt_os and pred_os is not None)
+        if od_correct:
+            stats['correct_samples_right_eye'] += 1
+        if os_correct:
+            stats['correct_samples_left_eye'] += 1
+        if od_correct or os_correct:
+            stats['correct_samples_any_eye'] += 1
+
+        is_correct = bool(od_correct and os_correct)
         
         if is_correct: 
             stats['correct_samples'] += 1
@@ -1108,6 +1155,19 @@ def analyze_dataset_v2(results: List[Dict], language: str) -> Dict:
     
     # Global summary.
     stats['accuracy'] = stats['correct_samples'] / stats['total_samples'] if stats['total_samples'] else 0
+    stats['accuracy_both_eyes'] = stats['accuracy']
+    stats['accuracy_right_eye'] = (
+        stats['correct_samples_right_eye'] / stats['evaluated_samples_right_eye']
+        if stats['evaluated_samples_right_eye'] else 0
+    )
+    stats['accuracy_left_eye'] = (
+        stats['correct_samples_left_eye'] / stats['evaluated_samples_left_eye']
+        if stats['evaluated_samples_left_eye'] else 0
+    )
+    stats['accuracy_at_least_one_eye'] = (
+        stats['correct_samples_any_eye'] / stats['evaluated_samples_any_eye']
+        if stats['evaluated_samples_any_eye'] else 0
+    )
     stats['avg_prob_all'] = np.mean(stats['all_probs']) if stats['all_probs'] else 0
     
     return stats
@@ -1135,6 +1195,14 @@ def _json_serializable(obj):
 def get_language_code(language: str) -> str:
     mapping = {'Chinese': 'zh', 'English': 'en', 'Malay': 'ms', 'Thai': 'th'}
     return mapping.get(language, 'en')
+
+
+def _ordered_languages(languages: List[str]) -> List[str]:
+    """Keep preferred language order for plots/tables."""
+    preferred = ['Chinese', 'English', 'Malay', 'Thai']
+    existing = set(languages)
+    return [l for l in preferred if l in existing] + sorted([l for l in existing if l not in preferred])
+
 
 def calculate_entropy(top_logprobs: List[Dict]) -> float:
     """Shannon entropy over normalized top candidate probabilities."""
@@ -1166,6 +1234,50 @@ def _is_patient_prediction_correct(result: Dict) -> bool:
         pred.get('OS') == gt.get('OS') and
         pred.get('OD') is not None
     )
+
+
+def _get_eye_prediction_status(result: Dict) -> Dict[str, bool]:
+    """Return eye-level evaluable/correct flags for one prediction result."""
+    pred, gt = extract_diagnosis_codes(result)
+    gt_od = gt.get('OD')
+    gt_os = gt.get('OS')
+    pred_od = pred.get('OD')
+    pred_os = pred.get('OS')
+    right_evaluable = gt_od is not None
+    left_evaluable = gt_os is not None
+    right_correct = bool(right_evaluable and pred_od is not None and pred_od == gt_od)
+    left_correct = bool(left_evaluable and pred_os is not None and pred_os == gt_os)
+    return {
+        'right_eye_evaluable': right_evaluable,
+        'left_eye_evaluable': left_evaluable,
+        'right_eye_correct': right_correct,
+        'left_eye_correct': left_correct,
+    }
+
+
+def _update_eye_accuracy_counter(counter: Dict[str, int], eye_status: Dict[str, bool]) -> None:
+    """Update per-eye numerator/denominator counters."""
+    if eye_status.get('right_eye_evaluable'):
+        counter['evaluated_right_eye'] += 1
+        if eye_status.get('right_eye_correct'):
+            counter['correct_right_eye'] += 1
+    if eye_status.get('left_eye_evaluable'):
+        counter['evaluated_left_eye'] += 1
+        if eye_status.get('left_eye_correct'):
+            counter['correct_left_eye'] += 1
+
+
+def _compute_eye_accuracy(counter: Dict[str, int], eye: str) -> float:
+    """Compute eye-level accuracy from accumulated counters."""
+    if eye == 'right':
+        denom = counter.get('evaluated_right_eye', 0)
+        num = counter.get('correct_right_eye', 0)
+    elif eye == 'left':
+        denom = counter.get('evaluated_left_eye', 0)
+        num = counter.get('correct_left_eye', 0)
+    else:
+        raise ValueError(f'Unsupported eye key: {eye}')
+    return float(num / denom) if denom else 0.0
 
 
 def _estimate_sample_metrics(result: Dict, language: str) -> Dict:
@@ -1393,6 +1505,12 @@ def analyze_tri_perspective_verification(
     overall_source_counts = Counter()
     overall_total = 0
     overall_correct = 0
+    overall_final_eye_counter = Counter({
+        'evaluated_right_eye': 0,
+        'evaluated_left_eye': 0,
+        'correct_right_eye': 0,
+        'correct_left_eye': 0,
+    })
 
     for lang in languages:
         if lang == 'English':
@@ -1415,20 +1533,52 @@ def analyze_tri_perspective_verification(
         a3_correct = 0
         a1_correct = 0
         a1_available = 0
+        a1_eye_counter = Counter({
+            'evaluated_right_eye': 0,
+            'evaluated_left_eye': 0,
+            'correct_right_eye': 0,
+            'correct_left_eye': 0,
+        })
+        a2_eye_counter = Counter({
+            'evaluated_right_eye': 0,
+            'evaluated_left_eye': 0,
+            'correct_right_eye': 0,
+            'correct_left_eye': 0,
+        })
+        a3_eye_counter = Counter({
+            'evaluated_right_eye': 0,
+            'evaluated_left_eye': 0,
+            'correct_right_eye': 0,
+            'correct_left_eye': 0,
+        })
+        final_eye_counter = Counter({
+            'evaluated_right_eye': 0,
+            'evaluated_left_eye': 0,
+            'correct_right_eye': 0,
+            'correct_left_eye': 0,
+        })
 
         for pid in shared_pids:
             a2_item = a2_by_pid[pid]
             a3_item = a3_by_pid[pid]
             a1_item = a1_by_pid.get(pid)
 
+            a2_eye_status = _get_eye_prediction_status(a2_item)
+            _update_eye_accuracy_counter(a2_eye_counter, a2_eye_status)
+            a3_eye_status = _get_eye_prediction_status(a3_item)
+            _update_eye_accuracy_counter(a3_eye_counter, a3_eye_status)
+
             if _is_patient_prediction_correct(a2_item):
                 a2_correct += 1
             if _is_patient_prediction_correct(a3_item):
                 a3_correct += 1
+
             if a1_item is not None:
                 a1_available += 1
                 if _is_patient_prediction_correct(a1_item):
                     a1_correct += 1
+                a1_eye_status = _get_eye_prediction_status(a1_item)
+                _update_eye_accuracy_counter(a1_eye_counter, a1_eye_status)
 
             if _is_semantically_consistent(a2_item, a3_item):
                 chosen_key = 'reasoning'
@@ -1458,9 +1608,12 @@ def analyze_tri_perspective_verification(
 
             source_counts[chosen_key] += 1
             resolution_counts[resolution] += 1
+
             chosen_correct = _is_patient_prediction_correct(chosen_item)
             if chosen_correct:
                 final_correct += 1
+            chosen_eye_status = _get_eye_prediction_status(chosen_item)
+            _update_eye_accuracy_counter(final_eye_counter, chosen_eye_status)
 
             decisions.append({
                 'patient_id': pid,
@@ -1471,6 +1624,8 @@ def analyze_tri_perspective_verification(
                 'chosen_source': chosen_key,
                 'chosen_pred': _prediction_signature(chosen_item),
                 'is_correct': bool(chosen_correct),
+                'is_correct_right_eye': bool(chosen_eye_status.get('right_eye_correct')),
+                'is_correct_left_eye': bool(chosen_eye_status.get('left_eye_correct')),
             })
 
         total = len(shared_pids)
@@ -1478,9 +1633,19 @@ def analyze_tri_perspective_verification(
             'shared_case_count': total,
             'a2_accuracy_on_shared': float(a2_correct / total) if total else 0.0,
             'a3_accuracy_on_shared': float(a3_correct / total) if total else 0.0,
+            'a2_accuracy_right_eye_on_shared': _compute_eye_accuracy(a2_eye_counter, 'right'),
+            'a2_accuracy_left_eye_on_shared': _compute_eye_accuracy(a2_eye_counter, 'left'),
+            'a3_accuracy_right_eye_on_shared': _compute_eye_accuracy(a3_eye_counter, 'right'),
+            'a3_accuracy_left_eye_on_shared': _compute_eye_accuracy(a3_eye_counter, 'left'),
             'a1_available_count': int(a1_available),
             'a1_accuracy_on_available': float(a1_correct / a1_available) if a1_available else 0.0,
+            'a1_accuracy_right_eye_on_available': _compute_eye_accuracy(a1_eye_counter, 'right'),
+            'a1_accuracy_left_eye_on_available': _compute_eye_accuracy(a1_eye_counter, 'left'),
             'final_accuracy': float(final_correct / total) if total else 0.0,
+            'final_accuracy_right_eye': _compute_eye_accuracy(final_eye_counter, 'right'),
+            'final_accuracy_left_eye': _compute_eye_accuracy(final_eye_counter, 'left'),
+            'final_evaluated_count_right_eye': int(final_eye_counter.get('evaluated_right_eye', 0)),
+            'final_evaluated_count_left_eye': int(final_eye_counter.get('evaluated_left_eye', 0)),
             'resolution_counts': dict(resolution_counts),
             'resolution_rates': {k: (v / total if total else 0.0) for k, v in resolution_counts.items()},
             'source_usage_counts': dict(source_counts),
@@ -1492,10 +1657,15 @@ def analyze_tri_perspective_verification(
         overall_correct += final_correct
         overall_resolution_counts.update(resolution_counts)
         overall_source_counts.update(source_counts)
+        overall_final_eye_counter.update(final_eye_counter)
 
     overall = {
         'shared_case_count': overall_total,
         'final_accuracy': float(overall_correct / overall_total) if overall_total else 0.0,
+        'final_accuracy_right_eye': _compute_eye_accuracy(overall_final_eye_counter, 'right'),
+        'final_accuracy_left_eye': _compute_eye_accuracy(overall_final_eye_counter, 'left'),
+        'final_evaluated_count_right_eye': int(overall_final_eye_counter.get('evaluated_right_eye', 0)),
+        'final_evaluated_count_left_eye': int(overall_final_eye_counter.get('evaluated_left_eye', 0)),
         'resolution_counts': dict(overall_resolution_counts),
         'resolution_rates': {k: (v / overall_total if overall_total else 0.0) for k, v in overall_resolution_counts.items()},
         'source_usage_counts': dict(overall_source_counts),
@@ -1561,7 +1731,10 @@ def _add_bar_labels(ax, label_items: List[Tuple], value_fmt: str, is_int: bool =
     ymin, ymax = ax.get_ylim()
     gap = (ymax - ymin) * _BAR_LABEL_GAP_FRAC
     for bar, val, err in label_items:
-        y_top = bar.get_height() + (err if err is not None else 0)
+        if val is None or not np.isfinite(val):
+            continue
+        err_val = err if (err is not None and np.isfinite(err)) else 0
+        y_top = bar.get_height() + err_val
         txt = f'{int(val)}' if is_int else value_fmt.format(val)
         ax.text(bar.get_x() + bar.get_width()/2, y_top + gap, txt, ha='center', va='bottom', fontsize=_PLOT_FONTSIZE_LABEL, rotation=0)
 
@@ -1591,31 +1764,39 @@ def _add_reference_line_with_value(ax, value: float, value_fmt: str = '{:.2f}'):
 
 
 def _draw_diagnosis_row(axes_row, all_data: Dict, method_name: str, categories: List[str],
-                        languages: List[str], colors: List, x: np.ndarray, width: float, y_max_acc: float,
-                        english_ref: Dict = None):
-    """Draw Acc/PPL/Count/Entropy panels for one method using English as a red reference line."""
-    display_languages = [l for l in languages if l not in DISPLAY_LANGUAGES_EXCLUDE]
+                        languages: List[str], colors: List, x: np.ndarray, width: float, y_max_acc: float):
+    """Draw Acc/PPL/Count/Entropy panels for one method."""
+    display_languages = list(languages)
+    category_labels = [DIAGNOSIS_CATEGORY_DISPLAY.get(cat, cat) for cat in categories]
     ax1, ax2, ax3, ax4 = axes_row
+
+    def _metric_with_count_guard(strat_item: Dict, metric_key: str, err_key: Optional[str] = None,
+                                 scale: float = 1.0) -> Tuple[float, float]:
+        n = int(strat_item.get('sample_count', 0) or 0)
+        if n <= 0:
+            return np.nan, 0.0
+        val = _safe_float(strat_item.get(metric_key), 0.0) * scale
+        err = _safe_float(strat_item.get(err_key), 0.0) * scale if err_key else 0.0
+        return val, err
+
     # --- Accuracy ---
     label_items_1 = []
     for i, lang in enumerate(display_languages):
         strat = all_data[lang].get('diagnosis_stratified', {})
-        accs = [strat.get(cat, {}).get('accuracy', 0) * 100 for cat in categories]
-        errs = [strat.get(cat, {}).get('accuracy_std', 0) * 100 for cat in categories]
+        accs, errs = [], []
+        for cat in categories:
+            acc, err = _metric_with_count_guard(strat.get(cat, {}), 'accuracy', 'accuracy_std', scale=100.0)
+            accs.append(acc)
+            errs.append(err)
         bars = ax1.bar(x + i*width, accs, width, label=lang, color=colors[i], alpha=0.8, yerr=errs, capsize=2, error_kw={'elinewidth': 1})
         for j, (bar, val) in enumerate(zip(bars, accs)):
             label_items_1.append((bar, val, errs[j] if j < len(errs) else 0))
-    eng_acc = None
-    if english_ref and ENGLISH_AS_REFERENCE_LINE:
-        eng_acc = (english_ref.get('accuracy') or 0) * 100
     ax1.set_xticks(x + width*(len(display_languages)-1)/2)
-    ax1.set_xticklabels(categories, rotation=15, fontsize=_PLOT_FONTSIZE_LABEL)
+    ax1.set_xticklabels(category_labels, rotation=20, ha='right', fontsize=_PLOT_FONTSIZE_LABEL)
     ax1.set_ylabel('Accuracy (%)', fontsize=_PLOT_FONTSIZE_LABEL)
     ax1.set_title(f'Accuracy ({method_name})', fontsize=_PLOT_FONTSIZE_TITLE)
     ax1.set_ylim(0, y_max_acc)
     ax1.tick_params(axis='y', labelsize=_PLOT_FONTSIZE_LABEL)
-    if eng_acc is not None:
-        _add_reference_line_with_value(ax1, eng_acc, '{:.1f}')
     ax1.legend(fontsize=_PLOT_FONTSIZE_LABEL)
     _add_bar_labels(ax1, label_items_1, '{:.1f}')
 
@@ -1623,16 +1804,16 @@ def _draw_diagnosis_row(axes_row, all_data: Dict, method_name: str, categories: 
     label_items_2 = []
     for i, lang in enumerate(display_languages):
         strat = all_data[lang].get('diagnosis_stratified', {})
-        ppls = [strat.get(cat, {}).get('avg_ppl', 0) for cat in categories]
-        errs = [strat.get(cat, {}).get('avg_ppl_std', 0) for cat in categories]
+        ppls, errs = [], []
+        for cat in categories:
+            ppl, err = _metric_with_count_guard(strat.get(cat, {}), 'avg_ppl', 'avg_ppl_std')
+            ppls.append(ppl)
+            errs.append(err)
         bars = ax2.bar(x + i*width, ppls, width, label=lang, color=colors[i], alpha=0.8, yerr=errs, capsize=2, error_kw={'elinewidth': 1})
         for j, (bar, val) in enumerate(zip(bars, ppls)):
             label_items_2.append((bar, val, errs[j] if j < len(errs) else 0))
-    if english_ref and ENGLISH_AS_REFERENCE_LINE:
-        eng_ppl = np.mean(english_ref.get('ppl_scores') or [0])
-        _add_reference_line_with_value(ax2, eng_ppl, '{:.2f}')
     ax2.set_xticks(x + width*(len(display_languages)-1)/2)
-    ax2.set_xticklabels(categories, rotation=15, fontsize=_PLOT_FONTSIZE_LABEL)
+    ax2.set_xticklabels(category_labels, rotation=20, ha='right', fontsize=_PLOT_FONTSIZE_LABEL)
     ax2.set_ylabel('Mean PPL', fontsize=_PLOT_FONTSIZE_LABEL)
     ax2.set_title(f'Perplexity ({method_name})', fontsize=_PLOT_FONTSIZE_TITLE)
     ax2.legend(fontsize=_PLOT_FONTSIZE_LABEL)
@@ -1647,11 +1828,8 @@ def _draw_diagnosis_row(axes_row, all_data: Dict, method_name: str, categories: 
         bars = ax3.bar(x + i*width, counts, width, label=lang, color=colors[i], alpha=0.8)
         for bar, val in zip(bars, counts):
             label_items_3.append((bar, val, None))
-    if english_ref and ENGLISH_AS_REFERENCE_LINE:
-        eng_n = english_ref.get('total_samples') or 0
-        _add_reference_line_with_value(ax3, float(eng_n), '{:.0f}')
     ax3.set_xticks(x + width*(len(display_languages)-1)/2)
-    ax3.set_xticklabels(categories, rotation=15, fontsize=_PLOT_FONTSIZE_LABEL)
+    ax3.set_xticklabels(category_labels, rotation=20, ha='right', fontsize=_PLOT_FONTSIZE_LABEL)
     ax3.set_ylabel('Sample Count', fontsize=_PLOT_FONTSIZE_LABEL)
     ax3.set_title(f'Distribution ({method_name})', fontsize=_PLOT_FONTSIZE_TITLE)
     ax3.legend(fontsize=_PLOT_FONTSIZE_LABEL)
@@ -1662,16 +1840,16 @@ def _draw_diagnosis_row(axes_row, all_data: Dict, method_name: str, categories: 
     label_items_4 = []
     for i, lang in enumerate(display_languages):
         strat = all_data[lang].get('diagnosis_stratified', {})
-        ents = [strat.get(cat, {}).get('avg_entropy', 0) for cat in categories]
-        errs = [strat.get(cat, {}).get('avg_entropy_std', 0) for cat in categories]
+        ents, errs = [], []
+        for cat in categories:
+            ent, err = _metric_with_count_guard(strat.get(cat, {}), 'avg_entropy', 'avg_entropy_std')
+            ents.append(ent)
+            errs.append(err)
         bars = ax4.bar(x + i*width, ents, width, label=lang, color=colors[i], alpha=0.8, yerr=errs, capsize=2, error_kw={'elinewidth': 1})
         for j, (bar, val) in enumerate(zip(bars, ents)):
             label_items_4.append((bar, val, errs[j] if j < len(errs) else 0))
-    if english_ref and ENGLISH_AS_REFERENCE_LINE:
-        eng_ent = np.mean(english_ref.get('entropy_all') or [0])
-        _add_reference_line_with_value(ax4, eng_ent, '{:.2f}')
     ax4.set_xticks(x + width*(len(display_languages)-1)/2)
-    ax4.set_xticklabels(categories, rotation=15, fontsize=_PLOT_FONTSIZE_LABEL)
+    ax4.set_xticklabels(category_labels, rotation=20, ha='right', fontsize=_PLOT_FONTSIZE_LABEL)
     ax4.set_ylabel('Mean Entropy', fontsize=_PLOT_FONTSIZE_LABEL)
     ax4.set_title(f'Uncertainty ({method_name})', fontsize=_PLOT_FONTSIZE_TITLE)
     ax4.legend(fontsize=_PLOT_FONTSIZE_LABEL)
@@ -1682,14 +1860,15 @@ def _draw_diagnosis_row(axes_row, all_data: Dict, method_name: str, categories: 
 def plot_diagnosis_stratified_performance(all_data: Dict[str, Dict], output_path: Path, method_name: str, english_ref: Dict = None):
     """Diagnosis-stratified performance for one method."""
     languages = sorted(all_data.keys())
-    display_languages = [l for l in languages if l not in DISPLAY_LANGUAGES_EXCLUDE]
+    display_languages = list(languages)
     all_categories = set()
     for lang_data in all_data.values():
         if lang_data.get('diagnosis_stratified'):
             all_categories.update(lang_data['diagnosis_stratified'].keys())
-    categories = sorted(all_categories)
-    if not categories:
+    if not all_categories:
         return
+    extra_categories = sorted([c for c in all_categories if c not in DIAGNOSIS_CATEGORY_ORDER])
+    categories = DIAGNOSIS_CATEGORY_ORDER + extra_categories
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     fig.suptitle(f'Disease-Stratified Performance: {method_name}', fontsize=_PLOT_FONTSIZE_SUPTITLE, fontweight='bold')
     colors = ['#9B59B6', '#27AE60', '#3498DB', '#F39C12'][:len(languages)]
@@ -1698,11 +1877,12 @@ def plot_diagnosis_stratified_performance(all_data: Dict[str, Dict], output_path
     all_accs_flat = []
     for lang in display_languages:
         strat = all_data[lang].get('diagnosis_stratified', {})
-        all_accs_flat.extend([strat.get(cat, {}).get('accuracy', 0) * 100 for cat in categories])
-    if english_ref and ENGLISH_AS_REFERENCE_LINE:
-        all_accs_flat.append((english_ref.get('accuracy') or 0) * 100)
+        for cat in categories:
+            item = strat.get(cat, {})
+            if (item.get('sample_count') or 0) > 0:
+                all_accs_flat.append(_safe_float(item.get('accuracy'), 0.0) * 100.0)
     y_max_acc = min(115, max(all_accs_flat) * 1.2 + 10) if all_accs_flat else 100
-    _draw_diagnosis_row([axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]], all_data, method_name, categories, languages, colors, x, width, y_max_acc, english_ref)
+    _draw_diagnosis_row([axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]], all_data, method_name, categories, languages, colors, x, width, y_max_acc)
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
     plt.close()
@@ -1716,15 +1896,16 @@ def plot_diagnosis_stratified_combined(all_data_by_method: Dict[str, Dict], outp
         return
     data0 = all_data_by_method[method_keys[0]]
     languages = sorted(data0.keys())
-    display_languages = [l for l in languages if l not in DISPLAY_LANGUAGES_EXCLUDE]
+    display_languages = list(languages)
     all_categories = set()
     for key in method_keys:
         for lang_data in list(all_data_by_method[key].values()):
             if lang_data.get('diagnosis_stratified'):
                 all_categories.update(lang_data['diagnosis_stratified'].keys())
-    categories = sorted(all_categories)
-    if not categories:
+    if not all_categories:
         return
+    extra_categories = sorted([c for c in all_categories if c not in DIAGNOSIS_CATEGORY_ORDER])
+    categories = DIAGNOSIS_CATEGORY_ORDER + extra_categories
     colors = ['#9B59B6', '#27AE60', '#3498DB', '#F39C12'][:len(languages)]
     x = np.arange(len(categories))
     width = 0.8 / max(len(display_languages), 1)
@@ -1733,9 +1914,10 @@ def plot_diagnosis_stratified_combined(all_data_by_method: Dict[str, Dict], outp
         d = all_data_by_method[key]
         for lang in display_languages:
             strat = d.get(lang, {}).get('diagnosis_stratified', {})
-            all_accs_flat.extend([strat.get(cat, {}).get('accuracy', 0) * 100 for cat in categories])
-    if english_ref and ENGLISH_AS_REFERENCE_LINE:
-        all_accs_flat.append((english_ref.get('accuracy') or 0) * 100)
+            for cat in categories:
+                item = strat.get(cat, {})
+                if (item.get('sample_count') or 0) > 0:
+                    all_accs_flat.append(_safe_float(item.get('accuracy'), 0.0) * 100.0)
     y_max_acc = min(115, max(all_accs_flat) * 1.2 + 10) if all_accs_flat else 100
 
     n_rows = len(method_keys)
@@ -1764,8 +1946,7 @@ def plot_diagnosis_stratified_combined(all_data_by_method: Dict[str, Dict], outp
             colors,
             x,
             width,
-            y_max_acc,
-            english_ref
+            y_max_acc
         )
     fig.subplots_adjust(left=0.05, right=0.98, top=0.90, bottom=0.08, hspace=0.35, wspace=0.25)
     plt.savefig(output_path, dpi=300)
@@ -1910,6 +2091,92 @@ def plot_confidence_analysis(all_data_by_method: Dict[str, Dict], output_path: P
     plt.close()
 
 
+def plot_accuracy_comparison(
+    all_data_by_method: Dict[str, Dict],
+    output_path: Path,
+    method_names: Dict[str, str],
+    english_ref: Dict = None,
+    accuracy_key: str = 'accuracy',
+    title: str = 'Overall Accuracy Comparison Across Methods',
+):
+    """Accuracy comparison across methods for one metric key."""
+    if not all_data_by_method:
+        return
+    method_keys = list(all_data_by_method.keys())
+    data0 = all_data_by_method[method_keys[0]]
+    languages = sorted(data0.keys())
+    display_languages = [l for l in languages if l not in DISPLAY_LANGUAGES_EXCLUDE]
+    if not display_languages:
+        return
+
+    # Keep method order consistent with config when available.
+    preferred_methods = ['direct', 'reasoning', 'translate_pivot']
+    ordered = [k for k in preferred_methods if k in method_keys]
+    ordered += [k for k in method_keys if k not in ordered]
+    method_keys = ordered
+
+    fig, ax = plt.subplots(figsize=(12, 7))
+    x = np.arange(len(display_languages))
+    width = 0.8 / max(len(method_keys), 1)
+    colors = ['#1F77B4', '#2CA02C', '#FF7F0E', '#9467BD'][:len(method_keys)]
+
+    all_vals = []
+    for i, key in enumerate(method_keys):
+        data = all_data_by_method[key]
+        vals = [data.get(lang, {}).get(accuracy_key, 0.0) * 100 for lang in display_languages]
+        bars = ax.bar(
+            x + (i - (len(method_keys) - 1) / 2) * width,
+            vals,
+            width,
+            label=method_names.get(key, key),
+            color=colors[i],
+            alpha=0.85
+        )
+        for bar, v in zip(bars, vals):
+            if np.isfinite(v):
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.8,
+                    f'{v:.1f}',
+                    ha='center',
+                    va='bottom',
+                    fontsize=_PLOT_FONTSIZE_LABEL
+                )
+        all_vals.extend(vals)
+
+    # English reference baseline from direct English (legacy behavior).
+    if english_ref and ENGLISH_AS_REFERENCE_LINE:
+        eng_acc = _safe_float(english_ref.get(accuracy_key, english_ref.get('accuracy', 0.0)), 0.0) * 100.0
+        ax.axhline(eng_acc, color='red', linestyle='-', linewidth=1.8, label='English (reference)')
+        ax.text(
+            0.99,
+            eng_acc,
+            f'{eng_acc:.1f}',
+            transform=ax.get_yaxis_transform(),
+            ha='right',
+            va='bottom',
+            color='red',
+            fontsize=_PLOT_FONTSIZE_LABEL,
+            bbox={'facecolor': 'white', 'edgecolor': 'none', 'alpha': 0.65, 'pad': 1},
+            clip_on=False
+        )
+        all_vals.append(eng_acc)
+
+    y_max = min(115, max(all_vals) * 1.2 + 8) if all_vals else 100
+    ax.set_ylim(0, y_max)
+    ax.set_xticks(x)
+    ax.set_xticklabels(display_languages, fontsize=_PLOT_FONTSIZE_LABEL)
+    for tick in ax.get_xticklabels():
+        tick.set_color(LANGUAGE_LABEL_COLORS.get(tick.get_text(), 'black'))
+    ax.set_ylabel('Accuracy (%)', fontsize=_PLOT_FONTSIZE_LABEL)
+    ax.set_title(title, fontsize=_PLOT_FONTSIZE_TITLE)
+    ax.grid(axis='y', alpha=0.3)
+    ax.legend(fontsize=_PLOT_FONTSIZE_LABEL)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+
+
 def plot_cot_uncertainty_analysis(all_data_by_method: Dict[str, Dict], output_path: Path, method_names: Dict[str, str], english_ref: Dict = None):
     """
     Plot CoT uncertainty signals:
@@ -1989,7 +2256,9 @@ def plot_cot_uncertainty_analysis(all_data_by_method: Dict[str, Dict], output_pa
 
 def plot_error_attribution(error_attribution_by_lang: Dict[str, Dict], output_path: Path):
     """Plot error attribution distribution by language."""
-    languages = [l for l in sorted(error_attribution_by_lang.keys()) if l not in DISPLAY_LANGUAGES_EXCLUDE]
+    languages = _ordered_languages(list(error_attribution_by_lang.keys()))
+    if not languages:
+        return
     dists = [error_attribution_by_lang.get(l, {}).get('distribution', {}) for l in languages]
     err_types = ['knowledge_gap', 'reasoning_failure', 'language_barrier', 'mixed']
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -2013,19 +2282,77 @@ def plot_error_attribution(error_attribution_by_lang: Dict[str, Dict], output_pa
     plt.close()
 
 
-def plot_gap_source_analysis(gap_analysis: Dict, output_path: Path, baseline_name: str = 'Baseline', compare_name: str = 'Compare'):
-    """Plot paired outcome transitions and source attribution by language."""
-    per_lang = gap_analysis.get('per_language', {})
-    languages = [l for l in sorted(per_lang.keys()) if l not in DISPLAY_LANGUAGES_EXCLUDE]
-    if not languages:
+def plot_error_attribution_combined(all_error_attribution_by_pair: Dict[str, Dict[str, Dict]],
+                                    output_path: Path,
+                                    method_names: Dict[str, str] = None):
+    """Plot all pairwise error-attribution results in one figure."""
+    if not all_error_attribution_by_pair:
         return
+    pair_tags = sorted(all_error_attribution_by_pair.keys())
+    err_types = ['knowledge_gap', 'reasoning_failure', 'language_barrier', 'mixed']
+    colors = ['#E74C3C', '#F39C12', '#3498DB', '#95A5A6']
+    labels = [et.replace('_', ' ').title() for et in err_types]
 
-    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-    fig.suptitle(
-        f'Paired Accuracy Gap and Source Attribution by Language ({baseline_name} vs {compare_name})',
-        fontsize=_PLOT_FONTSIZE_SUPTITLE,
-        fontweight='bold'
-    )
+    n_rows = len(pair_tags)
+    fig, axes = plt.subplots(n_rows, 1, figsize=(12, max(4.5, 3.8 * n_rows)), squeeze=False)
+    fig.suptitle('Error Attribution by Language (All Method Pairs)', fontsize=_PLOT_FONTSIZE_SUPTITLE, fontweight='bold')
+
+    for row, pair_tag in enumerate(pair_tags):
+        ax = axes[row, 0]
+        error_attribution_by_lang = all_error_attribution_by_pair[pair_tag]
+        languages = _ordered_languages(list(error_attribution_by_lang.keys()))
+        if not languages:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', fontsize=_PLOT_FONTSIZE_LABEL)
+            ax.set_axis_off()
+            continue
+        dists = [error_attribution_by_lang.get(l, {}).get('distribution', {}) for l in languages]
+        x = np.arange(len(languages))
+        w = 0.2
+        for i, et in enumerate(err_types):
+            vals = [d.get(et, 0) * 100 for d in dists]
+            bars = ax.bar(x + (i - 1.5) * w, vals, w, color=colors[i], alpha=0.85, label=labels[i] if row == 0 else None)
+            for bar, val in zip(bars, vals):
+                if val > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.5,
+                        f'{val:.0f}',
+                        ha='center',
+                        va='bottom',
+                        fontsize=_PLOT_FONTSIZE_LABEL - 1
+                    )
+        ax.set_xticks(x)
+        ax.set_xticklabels(languages)
+        ax.set_ylim(0, 100)
+        ax.set_ylabel('Error Type (%)')
+        ax.grid(axis='y', alpha=0.25)
+        if '_vs_' in pair_tag:
+            left, right = pair_tag.split('_vs_', 1)
+            left_name = method_names.get(left, left) if method_names else left
+            right_name = method_names.get(right, right) if method_names else right
+            title = f'{left_name} vs {right_name}'
+        else:
+            title = pair_tag
+        ax.set_title(title, fontsize=_PLOT_FONTSIZE_TITLE)
+
+    handles, legend_labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, legend_labels, loc='upper right', fontsize=_PLOT_FONTSIZE_LABEL)
+    plt.tight_layout(rect=[0, 0, 0.97, 0.95])
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+
+
+def _draw_gap_source_panels(axes_row, gap_analysis: Dict, baseline_name: str = 'Baseline', compare_name: str = 'Compare', show_legends: bool = True):
+    """Draw one row of gap-source panels (outcome/gain/loss)."""
+    per_lang = gap_analysis.get('per_language', {})
+    languages = _ordered_languages(list(per_lang.keys()))
+    if not languages:
+        for ax in axes_row:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', fontsize=_PLOT_FONTSIZE_LABEL)
+            ax.set_axis_off()
+        return
+    ax_outcome, ax_gain, ax_loss = axes_row
 
     # Panel 1: outcome transition rates (stacked)
     outcome_order = ['both_correct', 'compare_only_correct', 'baseline_only_correct', 'both_wrong']
@@ -2045,10 +2372,10 @@ def plot_gap_source_analysis(gap_analysis: Dict, output_path: Path, baseline_nam
     bottom = np.zeros(len(languages), dtype=float)
     for outcome in outcome_order:
         vals = np.array([per_lang[l].get('outcome_rates', {}).get(outcome, 0.0) * 100 for l in languages], dtype=float)
-        bars = axes[0].bar(x, vals, bottom=bottom, color=outcome_colors[outcome], label=outcome_labels[outcome], alpha=0.85)
+        bars = ax_outcome.bar(x, vals, bottom=bottom, color=outcome_colors[outcome], label=outcome_labels[outcome], alpha=0.85)
         for bar, v, b in zip(bars, vals, bottom):
             if v >= 8:
-                axes[0].text(
+                ax_outcome.text(
                     bar.get_x() + bar.get_width() / 2,
                     b + v / 2,
                     f'{v:.0f}',
@@ -2058,13 +2385,14 @@ def plot_gap_source_analysis(gap_analysis: Dict, output_path: Path, baseline_nam
                     color='white'
                 )
         bottom += vals
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(languages)
-    axes[0].set_ylim(0, 100)
-    axes[0].set_ylabel('Rate (%)')
-    axes[0].set_title('Outcome Transition')
-    axes[0].legend(fontsize=_PLOT_FONTSIZE_LABEL - 1)
-    axes[0].grid(axis='y', alpha=0.3)
+    ax_outcome.set_xticks(x)
+    ax_outcome.set_xticklabels(languages)
+    ax_outcome.set_ylim(0, 100)
+    ax_outcome.set_ylabel('Rate (%)')
+    ax_outcome.set_title('Outcome Transition')
+    if show_legends:
+        ax_outcome.legend(fontsize=_PLOT_FONTSIZE_LABEL - 1)
+    ax_outcome.grid(axis='y', alpha=0.3)
 
     # Panel 2: source attribution for gains (compare_only_correct)
     gain_order = ['language_barrier_reduced', 'stability_improved', 'uncertainty_reduced', 'confidence_improved', 'mixed_gain']
@@ -2078,15 +2406,16 @@ def plot_gap_source_analysis(gap_analysis: Dict, output_path: Path, baseline_nam
     bottom = np.zeros(len(languages), dtype=float)
     for source in gain_order:
         vals = np.array([per_lang[l].get('gain_sources_rates', {}).get(source, 0.0) * 100 for l in languages], dtype=float)
-        axes[1].bar(x, vals, bottom=bottom, color=gain_colors[source], label=source, alpha=0.85)
+        ax_gain.bar(x, vals, bottom=bottom, color=gain_colors[source], label=source, alpha=0.85)
         bottom += vals
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(languages)
-    axes[1].set_ylim(0, 100)
-    axes[1].set_ylabel(f'Rate in {compare_name} Only-Correct Cases (%)')
-    axes[1].set_title(f'Improvement Source ({compare_name})')
-    axes[1].legend(fontsize=_PLOT_FONTSIZE_LABEL - 1)
-    axes[1].grid(axis='y', alpha=0.3)
+    ax_gain.set_xticks(x)
+    ax_gain.set_xticklabels(languages)
+    ax_gain.set_ylim(0, 100)
+    ax_gain.set_ylabel(f'Rate in {compare_name} Only-Correct Cases (%)')
+    ax_gain.set_title(f'Improvement Source ({compare_name})')
+    if show_legends:
+        ax_gain.legend(fontsize=_PLOT_FONTSIZE_LABEL - 1)
+    ax_gain.grid(axis='y', alpha=0.3)
 
     # Panel 3: source attribution for losses (baseline_only_correct)
     loss_order = ['overconfident_wrong', 'stability_degraded', 'uncertainty_increased', 'confidence_dropped', 'code_switch_interference', 'mixed_loss']
@@ -2101,15 +2430,65 @@ def plot_gap_source_analysis(gap_analysis: Dict, output_path: Path, baseline_nam
     bottom = np.zeros(len(languages), dtype=float)
     for source in loss_order:
         vals = np.array([per_lang[l].get('loss_sources_rates', {}).get(source, 0.0) * 100 for l in languages], dtype=float)
-        axes[2].bar(x, vals, bottom=bottom, color=loss_colors[source], label=source, alpha=0.85)
+        ax_loss.bar(x, vals, bottom=bottom, color=loss_colors[source], label=source, alpha=0.85)
         bottom += vals
-    axes[2].set_xticks(x)
-    axes[2].set_xticklabels(languages)
-    axes[2].set_ylim(0, 100)
-    axes[2].set_ylabel(f'Rate in {baseline_name} Only-Correct Cases (%)')
-    axes[2].set_title(f'Degradation Source ({baseline_name})')
-    axes[2].legend(fontsize=_PLOT_FONTSIZE_LABEL - 1)
-    axes[2].grid(axis='y', alpha=0.3)
+    ax_loss.set_xticks(x)
+    ax_loss.set_xticklabels(languages)
+    ax_loss.set_ylim(0, 100)
+    ax_loss.set_ylabel(f'Rate in {baseline_name} Only-Correct Cases (%)')
+    ax_loss.set_title(f'Degradation Source ({baseline_name})')
+    if show_legends:
+        ax_loss.legend(fontsize=_PLOT_FONTSIZE_LABEL - 1)
+    ax_loss.grid(axis='y', alpha=0.3)
+
+
+def plot_gap_source_analysis(gap_analysis: Dict, output_path: Path, baseline_name: str = 'Baseline', compare_name: str = 'Compare'):
+    """Plot paired outcome transitions and source attribution by language."""
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+    fig.suptitle(
+        f'Paired Accuracy Gap and Source Attribution by Language ({baseline_name} vs {compare_name})',
+        fontsize=_PLOT_FONTSIZE_SUPTITLE,
+        fontweight='bold'
+    )
+    _draw_gap_source_panels(axes, gap_analysis, baseline_name, compare_name, show_legends=True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+
+
+def plot_gap_source_analysis_combined(all_gap_source_by_pair: Dict[str, Dict], output_path: Path, method_names: Dict[str, str] = None):
+    """Plot all pairwise gap-source results in one figure."""
+    if not all_gap_source_by_pair:
+        return
+    pair_tags = sorted(all_gap_source_by_pair.keys())
+    n_rows = len(pair_tags)
+    fig, axes = plt.subplots(n_rows, 3, figsize=(21, max(6.0, 5.2 * n_rows)), squeeze=False)
+    fig.suptitle('Paired Accuracy Gap and Source Attribution by Language (All Method Pairs)', fontsize=_PLOT_FONTSIZE_SUPTITLE, fontweight='bold')
+
+    for row, pair_tag in enumerate(pair_tags):
+        row_info = all_gap_source_by_pair[pair_tag]
+        gap_analysis = row_info.get('analysis', {})
+        baseline_name = row_info.get('baseline_name', 'Baseline')
+        compare_name = row_info.get('compare_name', 'Compare')
+        _draw_gap_source_panels(axes[row], gap_analysis, baseline_name, compare_name, show_legends=(row == 0))
+
+        if '_vs_' in pair_tag:
+            left, right = pair_tag.split('_vs_', 1)
+            left_name = method_names.get(left, left) if method_names else left
+            right_name = method_names.get(right, right) if method_names else right
+            pair_title = f'{left_name} vs {right_name}'
+        else:
+            pair_title = pair_tag
+        axes[row, 0].text(
+            0.0,
+            1.18,
+            pair_title,
+            transform=axes[row, 0].transAxes,
+            ha='left',
+            va='bottom',
+            fontsize=_PLOT_FONTSIZE_TITLE,
+            fontweight='bold'
+        )
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
@@ -2123,34 +2502,65 @@ def plot_tri_perspective_verification(verification: Dict, output_path: Path):
     if not languages:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    fig.suptitle('Tri-Perspective Verification (A1/A2/A3 + Majority Resolution)', fontsize=_PLOT_FONTSIZE_SUPTITLE, fontweight='bold')
+    fig, axes = plt.subplots(1, 3, figsize=(24, 6))
+    fig.suptitle('Tri-Perspective Verification (Eye-wise Accuracy + Majority Resolution)', fontsize=_PLOT_FONTSIZE_SUPTITLE, fontweight='bold')
 
-    # Panel 1: accuracy comparison.
     x = np.arange(len(languages))
     w = 0.2
-    a1 = [per_lang[l].get('a1_accuracy_on_available', 0.0) * 100 for l in languages]
-    a2 = [per_lang[l].get('a2_accuracy_on_shared', 0.0) * 100 for l in languages]
-    a3 = [per_lang[l].get('a3_accuracy_on_shared', 0.0) * 100 for l in languages]
-    af = [per_lang[l].get('final_accuracy', 0.0) * 100 for l in languages]
-    b1 = axes[0].bar(x - 1.5 * w, a1, w, label='A1 Direct', color='#95A5A6', alpha=0.85)
-    b2 = axes[0].bar(x - 0.5 * w, a2, w, label='A2 En-CoT', color='#3498DB', alpha=0.85)
-    b3 = axes[0].bar(x + 0.5 * w, a3, w, label='A3 Pivot', color='#9B59B6', alpha=0.85)
-    b4 = axes[0].bar(x + 1.5 * w, af, w, label='Final', color='#27AE60', alpha=0.9)
-    for bars in [b1, b2, b3, b4]:
-        for bar in bars:
-            val = bar.get_height()
-            if val > 0:
-                axes[0].text(bar.get_x() + bar.get_width()/2, val + _BAR_LABEL_GAP_SMALL, f'{val:.1f}', ha='center', va='bottom', fontsize=_PLOT_FONTSIZE_LABEL - 1)
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(languages)
-    axes[0].set_ylim(0, 100)
-    axes[0].set_ylabel('Accuracy (%)')
-    axes[0].set_title('Accuracy on Shared Cases')
-    axes[0].legend(fontsize=_PLOT_FONTSIZE_LABEL - 1)
-    axes[0].grid(axis='y', alpha=0.3)
 
-    # Panel 2: resolution composition.
+    def eye_metric(metric_key: str, fallback_key: str) -> List[float]:
+        values = []
+        for l in languages:
+            lang_data = per_lang.get(l, {})
+            values.append(_safe_float(lang_data.get(metric_key, lang_data.get(fallback_key, 0.0)), 0.0) * 100.0)
+        return values
+
+    def draw_accuracy_panel(ax, title: str, a1_vals: List[float], a2_vals: List[float], a3_vals: List[float], af_vals: List[float]):
+        b1 = ax.bar(x - 1.5 * w, a1_vals, w, label='A1 Direct', color='#95A5A6', alpha=0.85)
+        b2 = ax.bar(x - 0.5 * w, a2_vals, w, label='A2 En-CoT', color='#3498DB', alpha=0.85)
+        b3 = ax.bar(x + 0.5 * w, a3_vals, w, label='A3 Pivot', color='#9B59B6', alpha=0.85)
+        b4 = ax.bar(x + 1.5 * w, af_vals, w, label='Final', color='#27AE60', alpha=0.9)
+        for bars in [b1, b2, b3, b4]:
+            for bar in bars:
+                val = bar.get_height()
+                if val > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        val + _BAR_LABEL_GAP_SMALL,
+                        f'{val:.1f}',
+                        ha='center',
+                        va='bottom',
+                        fontsize=_PLOT_FONTSIZE_LABEL - 1
+                    )
+        ax.set_xticks(x)
+        ax.set_xticklabels(languages)
+        ax.set_ylim(0, 100)
+        ax.set_ylabel('Accuracy (%)')
+        ax.set_title(title)
+        ax.legend(fontsize=_PLOT_FONTSIZE_LABEL - 1)
+        ax.grid(axis='y', alpha=0.3)
+
+    # Panel 1: right-eye (OD) accuracy comparison.
+    draw_accuracy_panel(
+        axes[0],
+        'Right Eye Accuracy (OD)',
+        eye_metric('a1_accuracy_right_eye_on_available', 'a1_accuracy_on_available'),
+        eye_metric('a2_accuracy_right_eye_on_shared', 'a2_accuracy_on_shared'),
+        eye_metric('a3_accuracy_right_eye_on_shared', 'a3_accuracy_on_shared'),
+        eye_metric('final_accuracy_right_eye', 'final_accuracy'),
+    )
+
+    # Panel 2: left-eye (OS) accuracy comparison.
+    draw_accuracy_panel(
+        axes[1],
+        'Left Eye Accuracy (OS)',
+        eye_metric('a1_accuracy_left_eye_on_available', 'a1_accuracy_on_available'),
+        eye_metric('a2_accuracy_left_eye_on_shared', 'a2_accuracy_on_shared'),
+        eye_metric('a3_accuracy_left_eye_on_shared', 'a3_accuracy_on_shared'),
+        eye_metric('final_accuracy_left_eye', 'final_accuracy'),
+    )
+
+    # Panel 3: resolution composition.
     resolution_order = [
         'a2_a3_consistent_choose_a2',
         'a2_a3_conflict_a1_supports_a2',
@@ -2175,10 +2585,10 @@ def plot_tri_perspective_verification(verification: Dict, output_path: Path):
     bottom = np.zeros(len(languages), dtype=float)
     for key in resolution_order:
         vals = np.array([per_lang[l].get('resolution_rates', {}).get(key, 0.0) * 100 for l in languages], dtype=float)
-        bars = axes[1].bar(x, vals, bottom=bottom, color=colors[key], alpha=0.88, label=labels[key])
+        bars = axes[2].bar(x, vals, bottom=bottom, color=colors[key], alpha=0.88, label=labels[key])
         for bar, v, b in zip(bars, vals, bottom):
             if v >= 9:
-                axes[1].text(
+                axes[2].text(
                     bar.get_x() + bar.get_width()/2,
                     b + v/2,
                     f'{v:.0f}',
@@ -2188,13 +2598,13 @@ def plot_tri_perspective_verification(verification: Dict, output_path: Path):
                     color='white'
                 )
         bottom += vals
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(languages)
-    axes[1].set_ylim(0, 100)
-    axes[1].set_ylabel('Rate (%)')
-    axes[1].set_title('Resolution Composition')
-    axes[1].legend(fontsize=_PLOT_FONTSIZE_LABEL - 2)
-    axes[1].grid(axis='y', alpha=0.3)
+    axes[2].set_xticks(x)
+    axes[2].set_xticklabels(languages)
+    axes[2].set_ylim(0, 100)
+    axes[2].set_ylabel('Rate (%)')
+    axes[2].set_title('Resolution Composition')
+    axes[2].legend(fontsize=_PLOT_FONTSIZE_LABEL - 2)
+    axes[2].grid(axis='y', alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
@@ -2380,33 +2790,75 @@ def plot_cognitive_stability_distribution(all_data_by_method: Dict[str, Dict], o
     plt.close()
 
 
-def plot_stability_heatmap(all_data_by_method: Dict[str, Dict], output_path: Path):
-    """Cross-lingual heatmap of mean logprob by normalized token position."""
+def plot_stability_heatmap(all_data_by_method: Dict[str, Dict], output_path: Path, method_names: Dict[str, str] = None):
+    """Cross-lingual stability heatmap by method (including English)."""
     method_keys = sorted(all_data_by_method.keys())
-    data0 = all_data_by_method[method_keys[0]]
-    languages = [l for l in sorted(data0.keys()) if l not in DISPLAY_LANGUAGES_EXCLUDE]
-    # One row per language, 10 bins per row.
-    matrix = []
-    for lang in languages:
-        cs = data0.get(lang, {}).get('cognitive_stability', {})
-        row = cs.get('binned_mean_logprob', [0] * 10)
-        if len(row) != 10:
-            row = row + [0] * (10 - len(row))
-        matrix.append(row)
-    if not matrix:
+    if not method_keys:
         return
-    matrix = np.array(matrix)
-    fig, ax = plt.subplots(figsize=(10, 4))
-    im = ax.imshow(matrix, aspect='auto', cmap='RdYlGn', vmin=matrix.min(), vmax=matrix.max())
-    ax.set_yticks(range(len(languages)))
-    ax.set_yticklabels(languages, fontsize=_PLOT_FONTSIZE_LABEL)
-    ax.set_xticks(range(10))
-    ax.set_xticklabels([f'{i*10}-{(i+1)*10}%' for i in range(10)], fontsize=_PLOT_FONTSIZE_LABEL - 1)
-    ax.set_xlabel('Normalized Position (0=start, 1=end)', fontsize=_PLOT_FONTSIZE_LABEL)
-    ax.set_ylabel('Language', fontsize=_PLOT_FONTSIZE_LABEL)
-    ax.set_title('Cross-lingual Reasoning Stability: Mean Logprob by Position', fontsize=_PLOT_FONTSIZE_TITLE)
-    plt.colorbar(im, ax=ax, label='Mean Logprob')
-    plt.tight_layout()
+
+    preferred_languages = ['Chinese', 'English', 'Malay', 'Thai']
+    language_set = set()
+    for key in method_keys:
+        language_set.update(all_data_by_method.get(key, {}).keys())
+    languages = [l for l in preferred_languages if l in language_set] + sorted([l for l in language_set if l not in preferred_languages])
+    if not languages:
+        return
+
+    matrices = []
+    all_vals = []
+    for key in method_keys:
+        data = all_data_by_method.get(key, {})
+        matrix = []
+        for lang in languages:
+            cs = data.get(lang, {}).get('cognitive_stability', {})
+            row = cs.get('binned_mean_logprob', [])
+            if not row:
+                matrix.append([np.nan] * 10)
+                continue
+            row_vals = [_safe_float(v, np.nan) for v in row[:10]]
+            if len(row_vals) < 10:
+                row_vals += [np.nan] * (10 - len(row_vals))
+            matrix.append(row_vals)
+        matrix_np = np.array(matrix, dtype=float)
+        matrices.append((key, matrix_np))
+        finite_vals = matrix_np[np.isfinite(matrix_np)]
+        if finite_vals.size > 0:
+            all_vals.extend(finite_vals.tolist())
+
+    if not all_vals:
+        return
+
+    vmin = min(all_vals)
+    vmax = max(all_vals)
+    if np.isclose(vmin, vmax):
+        vmin -= 1e-6
+        vmax += 1e-6
+
+    n_rows = len(matrices)
+    fig, axes = plt.subplots(n_rows, 1, figsize=(11, max(4.5, 3.0 * n_rows)), squeeze=False)
+    fig.suptitle('Cross-lingual Reasoning Stability: Mean Logprob by Position (Per Method)', fontsize=_PLOT_FONTSIZE_SUPTITLE, fontweight='bold')
+    cmap = plt.get_cmap('RdYlGn').copy()
+    cmap.set_bad(color='#E6E6E6')
+    last_im = None
+
+    for row_idx, (method_key, matrix) in enumerate(matrices):
+        ax = axes[row_idx, 0]
+        last_im = ax.imshow(matrix, aspect='auto', cmap=cmap, vmin=vmin, vmax=vmax)
+        ax.set_yticks(range(len(languages)))
+        ax.set_yticklabels(languages, fontsize=_PLOT_FONTSIZE_LABEL)
+        ax.set_xticks(range(10))
+        ax.set_xticklabels([f'{i*10}-{(i+1)*10}%' for i in range(10)], fontsize=_PLOT_FONTSIZE_LABEL - 1)
+        if row_idx == n_rows - 1:
+            ax.set_xlabel('Normalized Position (0=start, 1=end)', fontsize=_PLOT_FONTSIZE_LABEL)
+        ax.set_ylabel('Language', fontsize=_PLOT_FONTSIZE_LABEL)
+        title = method_names.get(method_key, method_key) if method_names else method_key
+        ax.set_title(f'{title}', fontsize=_PLOT_FONTSIZE_TITLE)
+
+    if last_im is not None:
+        cbar = fig.colorbar(last_im, ax=[a for a in axes[:, 0]], fraction=0.025, pad=0.02)
+        cbar.set_label('Mean Logprob')
+
+    plt.tight_layout(rect=[0, 0, 0.95, 0.96])
     plt.savefig(output_path, dpi=300)
     plt.close()
 
@@ -2539,6 +2991,10 @@ def _export_method_summary_json(method_stats: Dict[str, Dict], out_path: Path):
             cs_export['per_sample_mutation_count_sample'] = [r['mutation_count'] for r in cs['per_sample_records'][:20]]
         out_json[lang] = {
             'accuracy': stats['accuracy'],
+            'accuracy_both_eyes': stats.get('accuracy_both_eyes', stats.get('accuracy', 0.0)),
+            'accuracy_right_eye': stats.get('accuracy_right_eye', 0.0),
+            'accuracy_left_eye': stats.get('accuracy_left_eye', 0.0),
+            'accuracy_at_least_one_eye': stats.get('accuracy_at_least_one_eye', 0.0),
             'diagnosis_stratified': stats['diagnosis_stratified'],
             'confidence_analysis': stats.get('confidence_analysis'),
             'key_step_confidence': stats.get('key_step_confidence'),
@@ -2571,15 +3027,38 @@ def run_analysis_for_dataset(
     method_names = {}
     method_folders = {key: folder for key, folder, _ in methods_config}
     raw_results_by_method: Dict[str, Dict[str, List[Dict]]] = defaultdict(dict)
+    direct_folder = method_folders.get('direct')
+    english_shared_results: Optional[List[Dict]] = None
+    english_shared_stats: Optional[Dict] = None
 
     for key, folder, name in methods_config:
         print(f"\n>> Processing Method: {name}")
         method_stats = {}
 
         for lang in languages:
-            # English uses direct-only data.
             if lang == 'English' and key != 'direct':
-                print("   [Skip] English: only use direct data")
+                if english_shared_results is None or english_shared_stats is None:
+                    if not direct_folder:
+                        print("   [!] Missing direct folder: cannot share English data")
+                        continue
+                    shared_fpath = base_dir / direct_folder / model / lang / 'round1.json'
+                    if not shared_fpath.exists():
+                        print(f"   [!] Missing shared English data: {shared_fpath}")
+                        continue
+                    print("   Loading English (shared direct data)...")
+                    with open(shared_fpath, 'r', encoding='utf-8') as f:
+                        shared_raw_data = json.load(f)
+                    english_shared_results = shared_raw_data.get('results', [])
+                    english_shared_stats = analyze_dataset_v2(english_shared_results, lang)
+                raw_results_by_method[key][lang] = english_shared_results
+                method_stats[lang] = copy.deepcopy(english_shared_stats)
+                print("   [Reuse] English: shared direct data")
+                print(
+                    "     Acc (Both/OD/OS): "
+                    f"{method_stats[lang]['accuracy']:.1%} / "
+                    f"{method_stats[lang].get('accuracy_right_eye', 0):.1%} / "
+                    f"{method_stats[lang].get('accuracy_left_eye', 0):.1%}"
+                )
                 continue
 
             fpath = base_dir / folder / model / lang / 'round1.json'
@@ -2595,7 +3074,15 @@ def run_analysis_for_dataset(
             raw_results_by_method[key][lang] = results
             stats = analyze_dataset_v2(results, lang)
             method_stats[lang] = stats
-            print(f"     Acc: {stats['accuracy']:.1%}")
+            if lang == 'English' and key == 'direct':
+                english_shared_results = results
+                english_shared_stats = copy.deepcopy(stats)
+            print(
+                "     Acc (Both/OD/OS): "
+                f"{stats['accuracy']:.1%} / "
+                f"{stats.get('accuracy_right_eye', 0):.1%} / "
+                f"{stats.get('accuracy_left_eye', 0):.1%}"
+            )
 
         if method_stats:
             all_method_stats[key] = method_stats
@@ -2618,6 +3105,10 @@ def run_analysis_for_dataset(
             continue
         method_pairs.append((left, right))
 
+    all_error_attribution_by_pair: Dict[str, Dict[str, Dict]] = {}
+    all_gap_source_by_pair: Dict[str, Dict] = {}
+    english_direct_results = raw_results_by_method.get('direct', {}).get('English')
+
     for baseline_key, compare_key in method_pairs:
         baseline_folder = method_folders.get(baseline_key)
         compare_folder = method_folders.get(compare_key)
@@ -2633,13 +3124,19 @@ def run_analysis_for_dataset(
 
         for lang in languages:
             if lang == 'English':
-                continue
-            baseline_results = raw_results_by_method.get(baseline_key, {}).get(lang)
-            compare_results = raw_results_by_method.get(compare_key, {}).get(lang)
+                if english_direct_results is None:
+                    continue
+                # For all pairs, English uses the direct-method round1 results.
+                baseline_results = english_direct_results
+                compare_results = english_direct_results
+            else:
+                baseline_results = raw_results_by_method.get(baseline_key, {}).get(lang)
+                compare_results = raw_results_by_method.get(compare_key, {}).get(lang)
             if baseline_results is None or compare_results is None:
                 continue
-            baseline_results_by_lang[lang] = baseline_results
-            compare_results_by_lang[lang] = compare_results
+            if lang != 'English':
+                baseline_results_by_lang[lang] = baseline_results
+                compare_results_by_lang[lang] = compare_results
             error_attribution_by_lang[lang] = analyze_error_attribution(
                 baseline_results,
                 compare_results,
@@ -2648,17 +3145,15 @@ def run_analysis_for_dataset(
 
         if error_attribution_by_lang:
             err_json_path = out_dir / f"{model_safe}_error_attribution_{pair_tag}.json"
-            err_png_path = out_dir / f"{model_safe}_error_attribution_{pair_tag}.png"
             with open(err_json_path, 'w', encoding='utf-8') as f:
                 json.dump(error_attribution_by_lang, f, indent=2, ensure_ascii=False)
-            plot_error_attribution(error_attribution_by_lang, err_png_path)
+            all_error_attribution_by_pair[pair_tag] = error_attribution_by_lang
             print(f"   Error attribution saved: {pair_tag}")
 
             # Keep legacy filenames for direct vs reasoning to preserve backward compatibility.
             if baseline_key == 'direct' and compare_key == 'reasoning':
                 with open(out_dir / f"{model_safe}_error_attribution.json", 'w', encoding='utf-8') as f:
                     json.dump(error_attribution_by_lang, f, indent=2, ensure_ascii=False)
-                plot_error_attribution(error_attribution_by_lang, out_dir / f"{model_safe}_error_attribution.png")
 
         gap_source_analysis = analyze_gap_sources_across_languages(
             direct_results_by_lang=baseline_results_by_lang,
@@ -2669,27 +3164,33 @@ def run_analysis_for_dataset(
         )
         if gap_source_analysis.get('per_language'):
             gap_json_path = out_dir / f"{model_safe}_gap_source_analysis_{pair_tag}.json"
-            gap_png_path = out_dir / f"{model_safe}_gap_source_analysis_{pair_tag}.png"
             with open(gap_json_path, 'w', encoding='utf-8') as f:
                 json.dump(_json_serializable(gap_source_analysis), f, indent=2, ensure_ascii=False)
-            plot_gap_source_analysis(
-                gap_source_analysis,
-                gap_png_path,
-                baseline_name=method_names.get(baseline_key, baseline_key),
-                compare_name=method_names.get(compare_key, compare_key),
-            )
+            all_gap_source_by_pair[pair_tag] = {
+                'analysis': gap_source_analysis,
+                'baseline_name': method_names.get(baseline_key, baseline_key),
+                'compare_name': method_names.get(compare_key, compare_key),
+            }
             print(f"   Gap-source analysis saved: {pair_tag}")
 
             # Keep legacy filenames for direct vs reasoning to preserve backward compatibility.
             if baseline_key == 'direct' and compare_key == 'reasoning':
                 with open(out_dir / f"{model_safe}_gap_source_analysis.json", 'w', encoding='utf-8') as f:
                     json.dump(_json_serializable(gap_source_analysis), f, indent=2, ensure_ascii=False)
-                plot_gap_source_analysis(
-                    gap_source_analysis,
-                    out_dir / f"{model_safe}_gap_source_analysis.png",
-                    baseline_name=method_names.get(baseline_key, baseline_key),
-                    compare_name=method_names.get(compare_key, compare_key),
-                )
+
+    # All pairwise error-attribution panels in one figure.
+    if all_error_attribution_by_pair:
+        combined_err_png = out_dir / f"{model_safe}_error_attribution_all_pairs.png"
+        plot_error_attribution_combined(all_error_attribution_by_pair, combined_err_png, method_names)
+        # Keep legacy figure name as alias to the combined plot.
+        plot_error_attribution_combined(all_error_attribution_by_pair, out_dir / f"{model_safe}_error_attribution.png", method_names)
+
+    # All pairwise gap-source panels in one figure.
+    if all_gap_source_by_pair:
+        combined_gap_png = out_dir / f"{model_safe}_gap_source_analysis_all_pairs.png"
+        plot_gap_source_analysis_combined(all_gap_source_by_pair, combined_gap_png, method_names)
+        # Keep legacy figure name as alias to the combined plot.
+        plot_gap_source_analysis_combined(all_gap_source_by_pair, out_dir / f"{model_safe}_gap_source_analysis.png", method_names)
 
     # Tri-perspective verification (A1/A2/A3 with conflict resolution).
     if 'reasoning' in raw_results_by_method and 'translate_pivot' in raw_results_by_method:
@@ -2710,13 +3211,30 @@ def run_analysis_for_dataset(
     # Combined figures for this dataset.
     if len(all_method_stats) >= 1:
         print("\n>> Generating combined figures...")
+        plot_accuracy_comparison(all_method_stats, out_dir / f"{model_safe}_accuracy_comparison.png", method_names, english_ref)
+        plot_accuracy_comparison(
+            all_method_stats,
+            out_dir / f"{model_safe}_accuracy_comparison_right_eye.png",
+            method_names,
+            english_ref,
+            accuracy_key='accuracy_right_eye',
+            title='Right Eye Accuracy (OD) Across Methods'
+        )
+        plot_accuracy_comparison(
+            all_method_stats,
+            out_dir / f"{model_safe}_accuracy_comparison_left_eye.png",
+            method_names,
+            english_ref,
+            accuracy_key='accuracy_left_eye',
+            title='Left Eye Accuracy (OS) Across Methods'
+        )
         plot_diagnosis_stratified_combined(all_method_stats, out_dir / f"{model_safe}_disease_stratified.png", method_names, english_ref)
         plot_confidence_analysis(all_method_stats, out_dir / f"{model_safe}_confidence_analysis.png", method_names, english_ref)
         plot_cot_uncertainty_analysis(all_method_stats, out_dir / f"{model_safe}_cot_uncertainty.png", method_names, english_ref)
         plot_token_level_analysis(all_method_stats, out_dir / f"{model_safe}_token_level.png", method_names, english_ref)
         plot_cross_lingual_analysis(all_method_stats, out_dir / f"{model_safe}_cross_lingual.png", english_ref)
         plot_cognitive_stability_distribution(all_method_stats, out_dir / f"{model_safe}_stability_distribution.png", method_names, english_ref)
-        plot_stability_heatmap(all_method_stats, out_dir / f"{model_safe}_stability_heatmap.png")
+        plot_stability_heatmap(all_method_stats, out_dir / f"{model_safe}_stability_heatmap.png", method_names)
         plot_single_case_trajectory(all_method_stats, out_dir / f"{model_safe}_stability_single_case.png", method_names)
         plot_stability_metrics_summary(all_method_stats, out_dir / f"{model_safe}_stability_metrics.png", method_names, english_ref)
         if len(all_method_stats) >= 2:

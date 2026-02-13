@@ -23,6 +23,12 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tqdm import tqdm
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
 
 # ----------------- Logging -----------------
 logging.basicConfig(level=logging.INFO,
@@ -400,7 +406,9 @@ def call_lmm_multi_turn_api(
     temperature: float = 0.2,
     max_tokens: Optional[int] = None,
     timeout_s: float = 120.0,
-) -> Tuple[str, Dict[str, int], float, Dict[str, Any]]:
+    logprobs: bool = True,
+    top_logprobs: int = 5,
+) -> Tuple[str, Dict[str, int], float, Dict[str, Any], Optional[List[Dict[str, Any]]]]:
     """
     Call LMM with a history of messages/images; returns the next assistant reply.
 
@@ -412,6 +420,7 @@ def call_lmm_multi_turn_api(
       usage: {input_tokens, output_tokens, total_tokens, reasoning_tokens}
       elapsed: float (seconds)
       raw_response: dict
+      logprobs_data: list of token logprobs (if enabled)
       
     Raises:
       AuthenticationError: Invalid API key
@@ -433,13 +442,18 @@ def call_lmm_multi_turn_api(
     t0 = time.time()
     
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=timeout_s,
-        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout": timeout_s,
+        }
+        if logprobs:
+            kwargs["logprobs"] = True
+            kwargs["top_logprobs"] = top_logprobs
+        
+        resp = client.chat.completions.create(**kwargs)
     except openai.AuthenticationError as e:
         raise AuthenticationError(f"Authentication failed: {e}")
     except openai.RateLimitError as e:
@@ -470,7 +484,27 @@ def call_lmm_multi_turn_api(
     else:
         usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "reasoning_tokens": 0}
 
-    return content, usage, elapsed, resp.model_dump()
+    # Extract logprobs data
+    logprobs_data = None
+    if logprobs and resp.choices[0].logprobs:
+        logprobs_data = []
+        for token_data in resp.choices[0].logprobs.content or []:
+            token_info = {
+                "token": token_data.token,
+                "logprob": token_data.logprob,
+                "probability": np.exp(token_data.logprob),
+                "top_logprobs": [
+                    {
+                        "token": tlp.token,
+                        "logprob": tlp.logprob,
+                        "probability": np.exp(tlp.logprob)
+                    }
+                    for tlp in (token_data.top_logprobs or [])
+                ]
+            }
+            logprobs_data.append(token_info)
+
+    return content, usage, elapsed, resp.model_dump(), logprobs_data
 
 
 def parse_step2_response(text: str, lang: str) -> Tuple[Optional[str], Optional[str]]:
@@ -782,7 +816,7 @@ class DiagnosisRunner:
                 ]
                 
                 # Step 1: extraction
-                step1_text, u1, e1, _ = call_lmm_multi_turn_api(
+                step1_text, u1, e1, _, step1_logprobs = call_lmm_multi_turn_api(
                     messages=msgs,
                     model=self.model,
                     api_key=self.api_key,
@@ -797,7 +831,7 @@ class DiagnosisRunner:
                 msgs.append({"role": "user", "content": step2_user})
 
                 # Step 2: prediction (Analysis + Conclusion)
-                step2_text, u2, e2, raw2 = call_lmm_multi_turn_api(
+                step2_text, u2, e2, raw2, step2_logprobs = call_lmm_multi_turn_api(
                     messages=msgs,
                     model=self.model,
                     api_key=self.api_key,
@@ -831,7 +865,9 @@ class DiagnosisRunner:
                     "step1_response": step1_text,
                     "step1_valid": step1_valid,
                     "step1_structured": step1_structured,
+                    "step1_logprobs": step1_logprobs,
                     "step2_response": step2_text,
+                    "step2_logprobs": step2_logprobs,
                     "Analysis": analysis,
                     "Conclusion": conclusion,
                     "conclusion_parsed": conclusion is not None,
@@ -1084,6 +1120,551 @@ class DiagnosisRunner:
             logger.info(f"  Average tokens per sample: {avg_tokens:.1f}")
         logger.info(f"{'='*60}\n")
 
+    def analyze_logprobs(
+        self,
+        output_dir: Optional[Path] = None,
+        rounds: int = 3,
+        target_languages: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Analyze and visualize logprobs data across all rounds and languages.
+        Generates comprehensive visualizations and statistical reports.
+        """
+        if output_dir is None:
+            output_dir = self._resolve_path("PeisongData/result/response", "output directory")
+        
+        sanitized_model = sanitize_filename(self.model.replace("/", "_"))
+        model_dir = output_dir / sanitized_model
+        
+        # Create analysis output directory
+        analysis_dir = model_dir / "logprobs_analysis"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        
+        all_languages = target_languages or list(self.language_mapping.keys())
+        
+        logger.info("="*60)
+        logger.info("Starting Logprobs Analysis & Visualization")
+        logger.info("="*60)
+        
+        # Collect all data
+        all_data = []
+        for rnd in range(1, rounds + 1):
+            for lang_code in all_languages:
+                lang_name = self.language_mapping[lang_code]
+                json_file = model_dir / lang_name.capitalize() / f"round{rnd}.json"
+                
+                if not json_file.exists():
+                    logger.warning(f"File not found: {json_file}")
+                    continue
+                
+                try:
+                    with open(json_file, "r", encoding="utf-8") as f:
+                        results = json.load(f)
+                    
+                    for item in results:
+                        result = item.get("result", {})
+                        if result and "step2_logprobs" in result:
+                            all_data.append({
+                                "round": rnd,
+                                "language": lang_code,
+                                "language_name": lang_name,
+                                "patient_id": item.get("patient_id"),
+                                "step1_logprobs": result.get("step1_logprobs"),
+                                "step2_logprobs": result.get("step2_logprobs"),
+                                "conclusion": result.get("Conclusion"),
+                                "conclusion_parsed": result.get("conclusion_parsed", False),
+                            })
+                except Exception as e:
+                    logger.error(f"Error loading {json_file}: {e}")
+        
+        if not all_data:
+            logger.warning("No logprobs data found. Skipping analysis.")
+            return
+        
+        logger.info(f"Loaded {len(all_data)} samples with logprobs data")
+        
+        # Generate visualizations
+        self._visualize_token_confidence(all_data, analysis_dir)
+        self._visualize_language_comparison(all_data, analysis_dir)
+        self._visualize_confidence_distribution(all_data, analysis_dir)
+        self._visualize_conclusion_confidence(all_data, analysis_dir)
+        self._generate_statistical_report(all_data, analysis_dir)
+        
+        logger.info(f"Analysis complete. Results saved to: {analysis_dir}")
+        logger.info("="*60)
+
+    def _visualize_token_confidence(self, all_data: List[Dict], output_dir: Path) -> None:
+        """Visualize token-level confidence for each language."""
+        logger.info("Generating token-level confidence visualizations...")
+        
+        for lang_code in set(d["language"] for d in all_data):
+            lang_data = [d for d in all_data if d["language"] == lang_code]
+            lang_name = lang_data[0]["language_name"]
+            
+            # Sample up to 10 examples
+            sample_data = lang_data[:10]
+            
+            fig, axes = plt.subplots(len(sample_data), 1, figsize=(16, 4 * len(sample_data)))
+            if len(sample_data) == 1:
+                axes = [axes]
+            
+            for idx, data in enumerate(sample_data):
+                ax = axes[idx]
+                logprobs = data["step2_logprobs"]
+                
+                if not logprobs:
+                    continue
+                
+                tokens = [lp["token"] for lp in logprobs[:100]]  # First 100 tokens
+                probs = [lp["probability"] for lp in logprobs[:100]]
+                
+                # Create color gradient based on confidence
+                colors = plt.cm.RdYlGn([p for p in probs])
+                
+                ax.bar(range(len(tokens)), probs, color=colors, width=0.8)
+                ax.axhline(y=0.5, color='r', linestyle='--', alpha=0.3, label='50% threshold')
+                ax.set_ylim([0, 1])
+                ax.set_xlabel("Token Position")
+                ax.set_ylabel("Probability")
+                ax.set_title(f"{lang_name} - Patient {data['patient_id']} - Step 2 Token Confidence\nConclusion: {data['conclusion']}")
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            output_file = output_dir / f"token_confidence_{lang_code}.png"
+            plt.savefig(output_file, dpi=300, bbox_inches='tight')
+            plt.close()
+            logger.info(f"Saved: {output_file}")
+
+    def _visualize_language_comparison(self, all_data: List[Dict], output_dir: Path) -> None:
+        """Compare confidence metrics across languages."""
+        logger.info("Generating language comparison visualizations...")
+        
+        # Calculate statistics per language
+        stats_by_lang = {}
+        for lang_code in set(d["language"] for d in all_data):
+            lang_data = [d for d in all_data if d["language"] == lang_code]
+            lang_name = lang_data[0]["language_name"]
+            
+            all_probs = []
+            for data in lang_data:
+                if data["step2_logprobs"]:
+                    probs = [lp["probability"] for lp in data["step2_logprobs"]]
+                    all_probs.extend(probs)
+            
+            if all_probs:
+                stats_by_lang[lang_name] = {
+                    "mean_confidence": np.mean(all_probs),
+                    "median_confidence": np.median(all_probs),
+                    "min_confidence": np.min(all_probs),
+                    "max_confidence": np.max(all_probs),
+                    "std_confidence": np.std(all_probs),
+                    "low_confidence_ratio": sum(1 for p in all_probs if p < 0.5) / len(all_probs),
+                    "high_confidence_ratio": sum(1 for p in all_probs if p > 0.8) / len(all_probs),
+                    "sample_count": len(lang_data),
+                    "token_count": len(all_probs),
+                }
+        
+        # Create comparison plots
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle("Language Comparison: Reasoning Chain Confidence Metrics", fontsize=16, fontweight='bold')
+        
+        languages = list(stats_by_lang.keys())
+        
+        # Plot 1: Mean Confidence
+        ax = axes[0, 0]
+        values = [stats_by_lang[lang]["mean_confidence"] for lang in languages]
+        bars = ax.bar(languages, values, color=plt.cm.viridis(np.linspace(0.3, 0.9, len(languages))))
+        ax.set_ylabel("Mean Confidence")
+        ax.set_title("Average Token Confidence by Language")
+        ax.set_ylim([0, 1])
+        for i, (bar, val) in enumerate(zip(bars, values)):
+            ax.text(bar.get_x() + bar.get_width()/2, val + 0.02, f'{val:.3f}', 
+                   ha='center', va='bottom', fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 2: Confidence Range
+        ax = axes[0, 1]
+        mins = [stats_by_lang[lang]["min_confidence"] for lang in languages]
+        maxs = [stats_by_lang[lang]["max_confidence"] for lang in languages]
+        means = [stats_by_lang[lang]["mean_confidence"] for lang in languages]
+        x_pos = np.arange(len(languages))
+        ax.errorbar(x_pos, means, 
+                   yerr=[np.array(means) - np.array(mins), np.array(maxs) - np.array(means)],
+                   fmt='o', markersize=8, capsize=5, capthick=2, linewidth=2)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(languages)
+        ax.set_ylabel("Confidence")
+        ax.set_title("Confidence Range (Min-Mean-Max)")
+        ax.set_ylim([0, 1])
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 3: Std Deviation
+        ax = axes[0, 2]
+        values = [stats_by_lang[lang]["std_confidence"] for lang in languages]
+        bars = ax.bar(languages, values, color=plt.cm.plasma(np.linspace(0.3, 0.9, len(languages))))
+        ax.set_ylabel("Std Deviation")
+        ax.set_title("Confidence Variability")
+        for bar, val in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width()/2, val + 0.005, f'{val:.3f}', 
+                   ha='center', va='bottom', fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 4: Low/High Confidence Ratio
+        ax = axes[1, 0]
+        low_ratios = [stats_by_lang[lang]["low_confidence_ratio"] * 100 for lang in languages]
+        high_ratios = [stats_by_lang[lang]["high_confidence_ratio"] * 100 for lang in languages]
+        x_pos = np.arange(len(languages))
+        width = 0.35
+        ax.bar(x_pos - width/2, low_ratios, width, label='Low (<50%)', color='#ff7f0e', alpha=0.8)
+        ax.bar(x_pos + width/2, high_ratios, width, label='High (>80%)', color='#2ca02c', alpha=0.8)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(languages)
+        ax.set_ylabel("Percentage (%)")
+        ax.set_title("Token Confidence Distribution")
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 5: Sample & Token Counts
+        ax = axes[1, 1]
+        sample_counts = [stats_by_lang[lang]["sample_count"] for lang in languages]
+        token_counts = [stats_by_lang[lang]["token_count"] for lang in languages]
+        x_pos = np.arange(len(languages))
+        width = 0.35
+        ax.bar(x_pos - width/2, sample_counts, width, label='Samples', color='#1f77b4', alpha=0.8)
+        ax2 = ax.twinx()
+        ax2.bar(x_pos + width/2, token_counts, width, label='Tokens', color='#d62728', alpha=0.8)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(languages)
+        ax.set_ylabel("Sample Count", color='#1f77b4')
+        ax2.set_ylabel("Token Count", color='#d62728')
+        ax.set_title("Data Volume by Language")
+        ax.legend(loc='upper left')
+        ax2.legend(loc='upper right')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 6: Median Confidence
+        ax = axes[1, 2]
+        values = [stats_by_lang[lang]["median_confidence"] for lang in languages]
+        bars = ax.bar(languages, values, color=plt.cm.cool(np.linspace(0.3, 0.9, len(languages))))
+        ax.set_ylabel("Median Confidence")
+        ax.set_title("Median Token Confidence")
+        ax.set_ylim([0, 1])
+        for bar, val in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width()/2, val + 0.02, f'{val:.3f}', 
+                   ha='center', va='bottom', fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        output_file = output_dir / "language_comparison.png"
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Saved: {output_file}")
+
+    def _visualize_confidence_distribution(self, all_data: List[Dict], output_dir: Path) -> None:
+        """Visualize confidence distribution as histograms and box plots."""
+        logger.info("Generating confidence distribution visualizations...")
+        
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle("Confidence Distribution Analysis", fontsize=16, fontweight='bold')
+        
+        # Collect data by language
+        lang_probs = {}
+        for lang_code in set(d["language"] for d in all_data):
+            lang_data = [d for d in all_data if d["language"] == lang_code]
+            lang_name = lang_data[0]["language_name"]
+            
+            all_probs = []
+            for data in lang_data:
+                if data["step2_logprobs"]:
+                    probs = [lp["probability"] for lp in data["step2_logprobs"]]
+                    all_probs.extend(probs)
+            
+            lang_probs[lang_name] = all_probs
+        
+        # Plot 1: Histogram overlay
+        ax = axes[0, 0]
+        for lang_name, probs in lang_probs.items():
+            ax.hist(probs, bins=50, alpha=0.5, label=lang_name, density=True)
+        ax.set_xlabel("Token Probability")
+        ax.set_ylabel("Density")
+        ax.set_title("Probability Distribution (Histogram)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 2: KDE (Kernel Density Estimation)
+        ax = axes[0, 1]
+        for lang_name, probs in lang_probs.items():
+            if len(probs) > 0:
+                sns.kdeplot(data=probs, ax=ax, label=lang_name, linewidth=2)
+        ax.set_xlabel("Token Probability")
+        ax.set_ylabel("Density")
+        ax.set_title("Probability Distribution (KDE)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 3: Box plot
+        ax = axes[1, 0]
+        box_data = [probs for probs in lang_probs.values()]
+        bp = ax.boxplot(box_data, labels=list(lang_probs.keys()), patch_artist=True)
+        for patch, color in zip(bp['boxes'], plt.cm.Set3(np.linspace(0, 1, len(box_data)))):
+            patch.set_facecolor(color)
+        ax.set_ylabel("Token Probability")
+        ax.set_title("Confidence Distribution (Box Plot)")
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 4: Violin plot
+        ax = axes[1, 1]
+        violin_data = []
+        labels = []
+        for lang_name, probs in lang_probs.items():
+            violin_data.append(probs)
+            labels.append(lang_name)
+        parts = ax.violinplot(violin_data, positions=range(len(violin_data)), 
+                             showmeans=True, showmedians=True)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels)
+        ax.set_ylabel("Token Probability")
+        ax.set_title("Confidence Distribution (Violin Plot)")
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        output_file = output_dir / "confidence_distribution.png"
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Saved: {output_file}")
+
+    def _visualize_conclusion_confidence(self, all_data: List[Dict], output_dir: Path) -> None:
+        """Analyze confidence specifically around conclusion tokens."""
+        logger.info("Generating conclusion-specific confidence visualizations...")
+        
+        # Keywords to identify conclusion tokens
+        conclusion_keywords = {
+            "zh": ["是", "否", "结论"],
+            "en": ["yes", "no", "conclusion"],
+            "ms": ["ya", "tidak", "kesimpulan"],
+            "th": ["ใช่", "ไม่ใช่", "สรุป"]
+        }
+        
+        conclusion_stats = {}
+        for lang_code in set(d["language"] for d in all_data):
+            lang_data = [d for d in all_data if d["language"] == lang_code]
+            lang_name = lang_data[0]["language_name"]
+            keywords = conclusion_keywords.get(lang_code, [])
+            
+            conclusion_probs = []
+            context_probs = []
+            
+            for data in lang_data:
+                if not data["step2_logprobs"]:
+                    continue
+                
+                for i, lp in enumerate(data["step2_logprobs"]):
+                    token_lower = lp["token"].lower().strip()
+                    is_conclusion = any(kw in token_lower for kw in keywords)
+                    
+                    if is_conclusion:
+                        conclusion_probs.append(lp["probability"])
+                        # Get surrounding context (±5 tokens)
+                        start = max(0, i - 5)
+                        end = min(len(data["step2_logprobs"]), i + 6)
+                        context = data["step2_logprobs"][start:end]
+                        context_probs.extend([c["probability"] for c in context if c != lp])
+            
+            if conclusion_probs:
+                conclusion_stats[lang_name] = {
+                    "conclusion_mean": np.mean(conclusion_probs),
+                    "conclusion_median": np.median(conclusion_probs),
+                    "conclusion_std": np.std(conclusion_probs),
+                    "context_mean": np.mean(context_probs) if context_probs else 0,
+                    "count": len(conclusion_probs),
+                }
+        
+        if not conclusion_stats:
+            logger.warning("No conclusion tokens found for analysis")
+            return
+        
+        # Create visualization
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        fig.suptitle("Conclusion Token Confidence Analysis", fontsize=16, fontweight='bold')
+        
+        languages = list(conclusion_stats.keys())
+        
+        # Plot 1: Conclusion vs Context confidence
+        ax = axes[0]
+        conclusion_means = [conclusion_stats[lang]["conclusion_mean"] for lang in languages]
+        context_means = [conclusion_stats[lang]["context_mean"] for lang in languages]
+        x_pos = np.arange(len(languages))
+        width = 0.35
+        ax.bar(x_pos - width/2, conclusion_means, width, label='Conclusion Tokens', color='#e74c3c', alpha=0.8)
+        ax.bar(x_pos + width/2, context_means, width, label='Context Tokens', color='#3498db', alpha=0.8)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(languages)
+        ax.set_ylabel("Mean Probability")
+        ax.set_title("Conclusion vs Context Token Confidence")
+        ax.set_ylim([0, 1])
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Add value labels
+        for i, (c_val, ctx_val) in enumerate(zip(conclusion_means, context_means)):
+            ax.text(i - width/2, c_val + 0.02, f'{c_val:.3f}', ha='center', va='bottom', fontweight='bold')
+            ax.text(i + width/2, ctx_val + 0.02, f'{ctx_val:.3f}', ha='center', va='bottom', fontweight='bold')
+        
+        # Plot 2: Conclusion confidence with error bars
+        ax = axes[1]
+        means = [conclusion_stats[lang]["conclusion_mean"] for lang in languages]
+        stds = [conclusion_stats[lang]["conclusion_std"] for lang in languages]
+        medians = [conclusion_stats[lang]["conclusion_median"] for lang in languages]
+        x_pos = np.arange(len(languages))
+        ax.errorbar(x_pos, means, yerr=stds, fmt='o', markersize=10, capsize=8, 
+                   capthick=2, linewidth=2, label='Mean ± Std', color='#2ecc71')
+        ax.scatter(x_pos, medians, marker='s', s=100, color='#e67e22', 
+                  label='Median', zorder=5, edgecolors='black', linewidths=2)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(languages)
+        ax.set_ylabel("Probability")
+        ax.set_title("Conclusion Token Confidence Statistics")
+        ax.set_ylim([0, 1])
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        output_file = output_dir / "conclusion_confidence.png"
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Saved: {output_file}")
+
+    def _generate_statistical_report(self, all_data: List[Dict], output_dir: Path) -> None:
+        """Generate comprehensive statistical report."""
+        logger.info("Generating statistical report...")
+        
+        report_lines = []
+        report_lines.append("="*80)
+        report_lines.append("LOGPROBS CONFIDENCE ANALYSIS - STATISTICAL REPORT")
+        report_lines.append("="*80)
+        report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report_lines.append(f"Model: {self.model}")
+        report_lines.append(f"Total Samples Analyzed: {len(all_data)}")
+        report_lines.append("="*80)
+        report_lines.append("")
+        
+        # Per-language statistics
+        for lang_code in sorted(set(d["language"] for d in all_data)):
+            lang_data = [d for d in all_data if d["language"] == lang_code]
+            lang_name = lang_data[0]["language_name"]
+            
+            report_lines.append(f"\n{'='*80}")
+            report_lines.append(f"LANGUAGE: {lang_name.upper()} ({lang_code})")
+            report_lines.append(f"{'='*80}")
+            report_lines.append(f"Total Samples: {len(lang_data)}")
+            
+            # Collect all probabilities
+            all_step1_probs = []
+            all_step2_probs = []
+            for data in lang_data:
+                if data["step1_logprobs"]:
+                    all_step1_probs.extend([lp["probability"] for lp in data["step1_logprobs"]])
+                if data["step2_logprobs"]:
+                    all_step2_probs.extend([lp["probability"] for lp in data["step2_logprobs"]])
+            
+            # Step 1 statistics
+            if all_step1_probs:
+                report_lines.append(f"\nStep 1 (Data Extraction) - Token Confidence:")
+                report_lines.append(f"  Total Tokens: {len(all_step1_probs):,}")
+                report_lines.append(f"  Mean Confidence: {np.mean(all_step1_probs):.4f}")
+                report_lines.append(f"  Median Confidence: {np.median(all_step1_probs):.4f}")
+                report_lines.append(f"  Std Deviation: {np.std(all_step1_probs):.4f}")
+                report_lines.append(f"  Min Confidence: {np.min(all_step1_probs):.4f}")
+                report_lines.append(f"  Max Confidence: {np.max(all_step1_probs):.4f}")
+                report_lines.append(f"  25th Percentile: {np.percentile(all_step1_probs, 25):.4f}")
+                report_lines.append(f"  75th Percentile: {np.percentile(all_step1_probs, 75):.4f}")
+                low_conf = sum(1 for p in all_step1_probs if p < 0.5)
+                high_conf = sum(1 for p in all_step1_probs if p > 0.8)
+                report_lines.append(f"  Low Confidence Tokens (<0.5): {low_conf} ({low_conf/len(all_step1_probs)*100:.2f}%)")
+                report_lines.append(f"  High Confidence Tokens (>0.8): {high_conf} ({high_conf/len(all_step1_probs)*100:.2f}%)")
+            
+            # Step 2 statistics
+            if all_step2_probs:
+                report_lines.append(f"\nStep 2 (Clinical Prediction) - Token Confidence:")
+                report_lines.append(f"  Total Tokens: {len(all_step2_probs):,}")
+                report_lines.append(f"  Mean Confidence: {np.mean(all_step2_probs):.4f}")
+                report_lines.append(f"  Median Confidence: {np.median(all_step2_probs):.4f}")
+                report_lines.append(f"  Std Deviation: {np.std(all_step2_probs):.4f}")
+                report_lines.append(f"  Min Confidence: {np.min(all_step2_probs):.4f}")
+                report_lines.append(f"  Max Confidence: {np.max(all_step2_probs):.4f}")
+                report_lines.append(f"  25th Percentile: {np.percentile(all_step2_probs, 25):.4f}")
+                report_lines.append(f"  75th Percentile: {np.percentile(all_step2_probs, 75):.4f}")
+                low_conf = sum(1 for p in all_step2_probs if p < 0.5)
+                high_conf = sum(1 for p in all_step2_probs if p > 0.8)
+                report_lines.append(f"  Low Confidence Tokens (<0.5): {low_conf} ({low_conf/len(all_step2_probs)*100:.2f}%)")
+                report_lines.append(f"  High Confidence Tokens (>0.8): {high_conf} ({high_conf/len(all_step2_probs)*100:.2f}%)")
+            
+            # Conclusion statistics
+            parsed_count = sum(1 for d in lang_data if d["conclusion_parsed"])
+            yes_count = sum(1 for d in lang_data if d["conclusion"] == "Yes")
+            no_count = sum(1 for d in lang_data if d["conclusion"] == "No")
+            report_lines.append(f"\nConclusion Parsing:")
+            report_lines.append(f"  Successfully Parsed: {parsed_count}/{len(lang_data)} ({parsed_count/len(lang_data)*100:.2f}%)")
+            report_lines.append(f"  'Yes' Conclusions: {yes_count}")
+            report_lines.append(f"  'No' Conclusions: {no_count}")
+            report_lines.append(f"  Unparsed: {len(lang_data) - parsed_count}")
+        
+        # Cross-language comparison
+        report_lines.append(f"\n\n{'='*80}")
+        report_lines.append("CROSS-LANGUAGE COMPARISON")
+        report_lines.append(f"{'='*80}")
+        
+        comparison_data = []
+        for lang_code in sorted(set(d["language"] for d in all_data)):
+            lang_data = [d for d in all_data if d["language"] == lang_code]
+            lang_name = lang_data[0]["language_name"]
+            
+            all_probs = []
+            for data in lang_data:
+                if data["step2_logprobs"]:
+                    all_probs.extend([lp["probability"] for lp in data["step2_logprobs"]])
+            
+            if all_probs:
+                comparison_data.append({
+                    "Language": lang_name,
+                    "Mean": np.mean(all_probs),
+                    "Median": np.median(all_probs),
+                    "Std": np.std(all_probs),
+                    "Samples": len(lang_data),
+                })
+        
+        if comparison_data:
+            report_lines.append(f"\n{'Language':<15} {'Mean Conf':>12} {'Median Conf':>12} {'Std Dev':>12} {'Samples':>10}")
+            report_lines.append("-"*65)
+            for row in comparison_data:
+                report_lines.append(f"{row['Language']:<15} {row['Mean']:>12.4f} {row['Median']:>12.4f} {row['Std']:>12.4f} {row['Samples']:>10}")
+        
+        # Best/Worst performers
+        if comparison_data:
+            best = max(comparison_data, key=lambda x: x["Mean"])
+            worst = min(comparison_data, key=lambda x: x["Mean"])
+            most_stable = min(comparison_data, key=lambda x: x["Std"])
+            
+            report_lines.append(f"\n\nKey Findings:")
+            report_lines.append(f"  Highest Mean Confidence: {best['Language']} ({best['Mean']:.4f})")
+            report_lines.append(f"  Lowest Mean Confidence: {worst['Language']} ({worst['Mean']:.4f})")
+            report_lines.append(f"  Most Stable (Lowest Std): {most_stable['Language']} ({most_stable['Std']:.4f})")
+        
+        report_lines.append(f"\n{'='*80}")
+        report_lines.append("END OF REPORT")
+        report_lines.append(f"{'='*80}\n")
+        
+        # Save report
+        report_file = output_dir / "statistical_report.txt"
+        with open(report_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(report_lines))
+        
+        logger.info(f"Saved: {report_file}")
+        
+        # Also print to console
+        print("\n".join(report_lines))
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Multi-turn Multi-Language LMM Evaluation (re-intubation)")
@@ -1101,6 +1682,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=int(os.getenv("LIMIT")) if os.getenv("LIMIT") else None)
     p.add_argument("--target-languages", nargs="+", default=os.getenv("TARGET_LANGUAGES", "").split() or None)
     p.add_argument("--image-dir", default=os.getenv("IMAGE_DIR", "PeisongData/dataset/data/figure"))
+    p.add_argument("--analyze-logprobs", action="store_true", help="Run logprobs analysis and visualization after processing")
+    p.add_argument("--only-analyze", action="store_true", help="Only run logprobs analysis without processing new samples")
     return p.parse_args()
 
 
@@ -1127,13 +1710,22 @@ if __name__ == "__main__":
         image_dir=args.image_dir,
     )
     try:
-        runner.process(
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            rounds=args.rounds,
-            limit=args.limit,
-            target_languages=args.target_languages,
-        )
+        # Run main processing unless only-analyze is specified
+        if not args.only_analyze:
+            runner.process(
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                rounds=args.rounds,
+                limit=args.limit,
+                target_languages=args.target_languages,
+            )
+        
+        # Run logprobs analysis if requested
+        if args.analyze_logprobs or args.only_analyze:
+            runner.analyze_logprobs(
+                rounds=args.rounds,
+                target_languages=args.target_languages,
+            )
     except KeyboardInterrupt:
         logger.info("Interrupted")
         raise SystemExit(0)

@@ -19,6 +19,11 @@ from functools import lru_cache
 import pandas as pd
 from openai import OpenAI
 from tqdm import tqdm
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
 
 # ----------------- Logging -----------------
 logging.basicConfig(level=logging.INFO,
@@ -49,6 +54,8 @@ class LanguageConfig:
     """Centralized language configuration for labels and translations"""
     
     SUPPORTED_LANGUAGES = ["English", "Chinese", "Malay", "Thai"]
+    # Short codes accepted by --target-languages (e.g. zh en ms th)
+    LANGUAGE_CODE_MAP = {"zh": "Chinese", "en": "English", "ms": "Malay", "th": "Thai"}
     
     @staticmethod
     @lru_cache(maxsize=4)
@@ -214,23 +221,27 @@ def validate_diagnosis_code(code: Any) -> Optional[int]:
 
 def validate_language(language: str) -> str:
     """
-    Validate language is supported.
+    Validate language is supported. Accepts full names (English, Chinese, Malay, Thai)
+    or short codes (en, zh, ms, th). Returns canonical full name.
     
     Args:
-        language: Language name to validate
+        language: Language name or code to validate
         
     Returns:
-        Validated language name
+        Validated canonical language name (English, Chinese, Malay, Thai)
         
     Raises:
         ValueError: If language is not supported
     """
-    if language not in LanguageConfig.SUPPORTED_LANGUAGES:
-        raise ValueError(
-            f"Invalid language: {language}. "
-            f"Must be one of {LanguageConfig.SUPPORTED_LANGUAGES}"
-        )
-    return language
+    lang = language.strip()
+    if lang in LanguageConfig.LANGUAGE_CODE_MAP:
+        return LanguageConfig.LANGUAGE_CODE_MAP[lang]
+    if lang in LanguageConfig.SUPPORTED_LANGUAGES:
+        return lang
+    raise ValueError(
+        f"Invalid language: {language}. "
+        f"Use full names {LanguageConfig.SUPPORTED_LANGUAGES} or codes {list(LanguageConfig.LANGUAGE_CODE_MAP.keys())}"
+    )
 
 
 def extract_json_from_text(text: str) -> Optional[str]:
@@ -900,7 +911,9 @@ Sila berikan respons anda dalam format JSON berikut:
         messages: List[Dict[str, Any]],
         temperature: float,
         max_tokens: Optional[int],
-    ) -> Tuple[str, Dict[str, int], float, Dict[str, Any]]:
+        logprobs: bool = True,
+        top_logprobs: int = 5,
+    ) -> Tuple[str, Dict[str, int], float, Dict[str, Any], Optional[List[Dict[str, Any]]]]:
         """
         Single chat.completions call with retries.
         
@@ -908,9 +921,11 @@ Sila berikan respons anda dalam format JSON berikut:
             messages: List of message dictionaries
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
+            logprobs: Whether to request logprobs
+            top_logprobs: Number of top logprobs to return
             
         Returns:
-            Tuple of (content, usage_dict, elapsed_time, raw_response)
+            Tuple of (content, usage_dict, elapsed_time, raw_response, logprobs_data)
             
         Raises:
             Exception: If all retries fail
@@ -923,13 +938,18 @@ Sila berikan respons anda dalam format JSON berikut:
             t0 = time.time()
             
             try:
-                resp = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    timeout=self.timeout_s,
-                )
+                kwargs = {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "timeout": self.timeout_s,
+                }
+                if logprobs:
+                    kwargs["logprobs"] = True
+                    kwargs["top_logprobs"] = top_logprobs
+                
+                resp = self.client.chat.completions.create(**kwargs)
                 elapsed = time.time() - t0
 
                 if not resp or not resp.choices:
@@ -942,7 +962,27 @@ Sila berikan respons anda dalam format JSON berikut:
                 raw_usage = resp_dict.get("usage") or getattr(resp, "usage", None)
                 usage_map = self._coerce_usage(raw_usage)
 
-                return content, usage_map, elapsed, resp_dict
+                # Extract logprobs data
+                logprobs_data = None
+                if logprobs and resp.choices[0].logprobs:
+                    logprobs_data = []
+                    for token_data in resp.choices[0].logprobs.content or []:
+                        token_info = {
+                            "token": token_data.token,
+                            "logprob": token_data.logprob,
+                            "probability": np.exp(token_data.logprob),
+                            "top_logprobs": [
+                                {
+                                    "token": tlp.token,
+                                    "logprob": tlp.logprob,
+                                    "probability": np.exp(tlp.logprob)
+                                }
+                                for tlp in (token_data.top_logprobs or [])
+                            ]
+                        }
+                        logprobs_data.append(token_info)
+
+                return content, usage_map, elapsed, resp_dict, logprobs_data
 
             except Exception as e:
                 last_exception = e
@@ -1064,7 +1104,7 @@ Sila berikan respons anda dalam format JSON berikut:
         )
 
         # Call API
-        reply, usage, elapsed, raw = self._chat_call(
+        reply, usage, elapsed, raw, logprobs_data = self._chat_call(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -1104,6 +1144,7 @@ Sila berikan respons anda dalam format JSON berikut:
                 "parsed_response": parse_result["parsed_response"],
                 "parse_success": parse_result["parse_success"],
                 "parse_error": parse_result["parse_error"],
+                "logprobs": logprobs_data,
             },
             "ground_truth": ground_truth,
             "metadata": {
@@ -1232,19 +1273,15 @@ Sila berikan respons anda dalam format JSON berikut:
         languages_to_process = []
         
         if target_languages is not None:
-            # Parse multiple languages (support comma or space separated)
+            # Parse multiple languages (support comma or space separated; accept zh, en, ms, th or full names)
             lang_list = re.split(r'[,\s]+', target_languages.strip())
-            languages_to_process = [lang.strip() for lang in lang_list if lang.strip()]
+            languages_to_process = [validate_language(lang.strip()) for lang in lang_list if lang.strip()]
         elif target_language is not None:
-            languages_to_process = [target_language]
+            languages_to_process = [validate_language(target_language)]
         else:
             # Default to English if not specified
             languages_to_process = ["English"]
             logger.info("No target language specified, defaulting to: English")
-
-        # Validate all languages
-        for lang in languages_to_process:
-            validate_language(lang)
 
         logger.info(f"Processing languages: {', '.join(languages_to_process)}")
 
@@ -1450,6 +1487,419 @@ Sila berikan respons anda dalam format JSON berikut:
         except Exception:
             pass
 
+    def analyze_logprobs(
+        self,
+        output_base_dir: str = "OphthalmologyEHRglaucoma/result/response_3type",
+        rounds: int = 3,
+        target_languages: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Analyze and visualize logprobs data across all rounds and languages.
+        Generates comprehensive visualizations and statistical reports.
+        """
+        base_output_dir = Path(output_base_dir)
+        sanitized_model = sanitize_filename(self.model.replace('/', '_'))
+        model_dir = base_output_dir / sanitized_model
+        
+        # Create analysis output directory
+        analysis_dir = model_dir / "logprobs_analysis"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        
+        languages_to_analyze = target_languages or LanguageConfig.SUPPORTED_LANGUAGES
+        
+        logger.info("="*60)
+        logger.info("Starting Logprobs Analysis & Visualization (3-Type)")
+        logger.info("="*60)
+        
+        # Collect all data
+        all_data = []
+        for rnd in range(1, rounds + 1):
+            for language in languages_to_analyze:
+                json_file = model_dir / language / f"round{rnd}.json"
+                
+                if not json_file.exists():
+                    logger.warning(f"File not found: {json_file}")
+                    continue
+                
+                try:
+                    with open(json_file, "r", encoding="utf-8") as f:
+                        loaded_data = json.load(f)
+                    
+                    # Handle both formats
+                    if isinstance(loaded_data, dict) and "results" in loaded_data:
+                        results = loaded_data["results"]
+                    elif isinstance(loaded_data, list):
+                        results = loaded_data
+                    else:
+                        continue
+                    
+                    for item in results:
+                        output = item.get("output", {})
+                        if output and "logprobs" in output and output["logprobs"]:
+                            all_data.append({
+                                "round": rnd,
+                                "language": language,
+                                "patient_id": item.get("patient_id"),
+                                "logprobs": output["logprobs"],
+                                "parsed_response": output.get("parsed_response", {}),
+                            })
+                except Exception as e:
+                    logger.error(f"Error loading {json_file}: {e}")
+        
+        if not all_data:
+            logger.warning("No logprobs data found. Skipping analysis.")
+            return
+        
+        logger.info(f"Loaded {len(all_data)} samples with logprobs data")
+        
+        # Generate visualizations
+        self._visualize_token_confidence_glaucoma(all_data, analysis_dir)
+        self._visualize_language_comparison_glaucoma(all_data, analysis_dir)
+        self._visualize_confidence_distribution_glaucoma(all_data, analysis_dir)
+        self._generate_statistical_report_glaucoma(all_data, analysis_dir)
+        
+        logger.info(f"Analysis complete. Results saved to: {analysis_dir}")
+        logger.info("="*60)
+
+    def _visualize_token_confidence_glaucoma(self, all_data: List[Dict], output_dir: Path) -> None:
+        """Visualize token-level confidence for each language."""
+        logger.info("Generating token-level confidence visualizations...")
+        
+        for language in set(d["language"] for d in all_data):
+            lang_data = [d for d in all_data if d["language"] == language]
+            
+            # Sample up to 10 examples
+            sample_data = lang_data[:10]
+            
+            fig, axes = plt.subplots(len(sample_data), 1, figsize=(16, 4 * len(sample_data)))
+            if len(sample_data) == 1:
+                axes = [axes]
+            
+            for idx, data in enumerate(sample_data):
+                ax = axes[idx]
+                logprobs = data["logprobs"]
+                
+                if not logprobs:
+                    continue
+                
+                tokens = [lp["token"] for lp in logprobs[:100]]  # First 100 tokens
+                probs = [lp["probability"] for lp in logprobs[:100]]
+                
+                # Create color gradient based on confidence
+                colors = plt.cm.RdYlGn([p for p in probs])
+                
+                ax.bar(range(len(tokens)), probs, color=colors, width=0.8)
+                ax.axhline(y=0.5, color='r', linestyle='--', alpha=0.3, label='50% threshold')
+                ax.set_ylim([0, 1])
+                ax.set_xlabel("Token Position")
+                ax.set_ylabel("Probability")
+                ax.set_title(f"{language} - Patient {data['patient_id']} - Token Confidence (3-Type)")
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            output_file = output_dir / f"token_confidence_{language}.png"
+            plt.savefig(output_file, dpi=300, bbox_inches='tight')
+            plt.close()
+            logger.info(f"Saved: {output_file}")
+
+    def _visualize_language_comparison_glaucoma(self, all_data: List[Dict], output_dir: Path) -> None:
+        """Compare confidence metrics across languages."""
+        logger.info("Generating language comparison visualizations...")
+        
+        # Calculate statistics per language
+        stats_by_lang = {}
+        for language in set(d["language"] for d in all_data):
+            lang_data = [d for d in all_data if d["language"] == language]
+            
+            all_probs = []
+            for data in lang_data:
+                if data["logprobs"]:
+                    probs = [lp["probability"] for lp in data["logprobs"]]
+                    all_probs.extend(probs)
+            
+            if all_probs:
+                stats_by_lang[language] = {
+                    "mean_confidence": np.mean(all_probs),
+                    "median_confidence": np.median(all_probs),
+                    "min_confidence": np.min(all_probs),
+                    "max_confidence": np.max(all_probs),
+                    "std_confidence": np.std(all_probs),
+                    "low_confidence_ratio": sum(1 for p in all_probs if p < 0.5) / len(all_probs),
+                    "high_confidence_ratio": sum(1 for p in all_probs if p > 0.8) / len(all_probs),
+                    "sample_count": len(lang_data),
+                    "token_count": len(all_probs),
+                }
+        
+        # Create comparison plots
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle("Language Comparison: Reasoning Chain Confidence Metrics (3-Type)", fontsize=16, fontweight='bold')
+        
+        languages = list(stats_by_lang.keys())
+        
+        # Plot 1: Mean Confidence
+        ax = axes[0, 0]
+        values = [stats_by_lang[lang]["mean_confidence"] for lang in languages]
+        bars = ax.bar(languages, values, color=plt.cm.viridis(np.linspace(0.3, 0.9, len(languages))))
+        ax.set_ylabel("Mean Confidence")
+        ax.set_title("Average Token Confidence by Language")
+        ax.set_ylim([0, 1])
+        for i, (bar, val) in enumerate(zip(bars, values)):
+            ax.text(bar.get_x() + bar.get_width()/2, val + 0.02, f'{val:.3f}', 
+                   ha='center', va='bottom', fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 2: Confidence Range
+        ax = axes[0, 1]
+        mins = [stats_by_lang[lang]["min_confidence"] for lang in languages]
+        maxs = [stats_by_lang[lang]["max_confidence"] for lang in languages]
+        means = [stats_by_lang[lang]["mean_confidence"] for lang in languages]
+        x_pos = np.arange(len(languages))
+        ax.errorbar(x_pos, means, 
+                   yerr=[np.array(means) - np.array(mins), np.array(maxs) - np.array(means)],
+                   fmt='o', markersize=8, capsize=5, capthick=2, linewidth=2)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(languages)
+        ax.set_ylabel("Confidence")
+        ax.set_title("Confidence Range (Min-Mean-Max)")
+        ax.set_ylim([0, 1])
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 3: Std Deviation
+        ax = axes[0, 2]
+        values = [stats_by_lang[lang]["std_confidence"] for lang in languages]
+        bars = ax.bar(languages, values, color=plt.cm.plasma(np.linspace(0.3, 0.9, len(languages))))
+        ax.set_ylabel("Std Deviation")
+        ax.set_title("Confidence Variability")
+        for bar, val in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width()/2, val + 0.005, f'{val:.3f}', 
+                   ha='center', va='bottom', fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 4: Low/High Confidence Ratio
+        ax = axes[1, 0]
+        low_ratios = [stats_by_lang[lang]["low_confidence_ratio"] * 100 for lang in languages]
+        high_ratios = [stats_by_lang[lang]["high_confidence_ratio"] * 100 for lang in languages]
+        x_pos = np.arange(len(languages))
+        width = 0.35
+        ax.bar(x_pos - width/2, low_ratios, width, label='Low (<50%)', color='#ff7f0e', alpha=0.8)
+        ax.bar(x_pos + width/2, high_ratios, width, label='High (>80%)', color='#2ca02c', alpha=0.8)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(languages)
+        ax.set_ylabel("Percentage (%)")
+        ax.set_title("Token Confidence Distribution")
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 5: Sample & Token Counts
+        ax = axes[1, 1]
+        sample_counts = [stats_by_lang[lang]["sample_count"] for lang in languages]
+        token_counts = [stats_by_lang[lang]["token_count"] for lang in languages]
+        x_pos = np.arange(len(languages))
+        width = 0.35
+        ax.bar(x_pos - width/2, sample_counts, width, label='Samples', color='#1f77b4', alpha=0.8)
+        ax2 = ax.twinx()
+        ax2.bar(x_pos + width/2, token_counts, width, label='Tokens', color='#d62728', alpha=0.8)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(languages)
+        ax.set_ylabel("Sample Count", color='#1f77b4')
+        ax2.set_ylabel("Token Count", color='#d62728')
+        ax.set_title("Data Volume by Language")
+        ax.legend(loc='upper left')
+        ax2.legend(loc='upper right')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 6: Median Confidence
+        ax = axes[1, 2]
+        values = [stats_by_lang[lang]["median_confidence"] for lang in languages]
+        bars = ax.bar(languages, values, color=plt.cm.cool(np.linspace(0.3, 0.9, len(languages))))
+        ax.set_ylabel("Median Confidence")
+        ax.set_title("Median Token Confidence")
+        ax.set_ylim([0, 1])
+        for bar, val in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width()/2, val + 0.02, f'{val:.3f}', 
+                   ha='center', va='bottom', fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        output_file = output_dir / "language_comparison.png"
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Saved: {output_file}")
+
+    def _visualize_confidence_distribution_glaucoma(self, all_data: List[Dict], output_dir: Path) -> None:
+        """Visualize confidence distribution as histograms and box plots."""
+        logger.info("Generating confidence distribution visualizations...")
+        
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle("Confidence Distribution Analysis (3-Type)", fontsize=16, fontweight='bold')
+        
+        # Collect data by language
+        lang_probs = {}
+        for language in set(d["language"] for d in all_data):
+            lang_data = [d for d in all_data if d["language"] == language]
+            
+            all_probs = []
+            for data in lang_data:
+                if data["logprobs"]:
+                    probs = [lp["probability"] for lp in data["logprobs"]]
+                    all_probs.extend(probs)
+            
+            lang_probs[language] = all_probs
+        
+        # Plot 1: Histogram overlay
+        ax = axes[0, 0]
+        for lang_name, probs in lang_probs.items():
+            if probs:
+                ax.hist(probs, bins=50, alpha=0.5, label=lang_name, density=True)
+        ax.set_xlabel("Token Probability")
+        ax.set_ylabel("Density")
+        ax.set_title("Probability Distribution (Histogram)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 2: KDE (Kernel Density Estimation)
+        ax = axes[0, 1]
+        for lang_name, probs in lang_probs.items():
+            if len(probs) > 0:
+                sns.kdeplot(data=probs, ax=ax, label=lang_name, linewidth=2)
+        ax.set_xlabel("Token Probability")
+        ax.set_ylabel("Density")
+        ax.set_title("Probability Distribution (KDE)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 3: Box plot
+        ax = axes[1, 0]
+        box_data = [probs for probs in lang_probs.values() if probs]
+        bp = ax.boxplot(box_data, labels=[k for k, v in lang_probs.items() if v], patch_artist=True)
+        for patch, color in zip(bp['boxes'], plt.cm.Set3(np.linspace(0, 1, len(box_data)))):
+            patch.set_facecolor(color)
+        ax.set_ylabel("Token Probability")
+        ax.set_title("Confidence Distribution (Box Plot)")
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Plot 4: Violin plot
+        ax = axes[1, 1]
+        violin_data = []
+        labels = []
+        for lang_name, probs in lang_probs.items():
+            if probs:
+                violin_data.append(probs)
+                labels.append(lang_name)
+        if violin_data:
+            parts = ax.violinplot(violin_data, positions=range(len(violin_data)), 
+                                 showmeans=True, showmedians=True)
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels)
+        ax.set_ylabel("Token Probability")
+        ax.set_title("Confidence Distribution (Violin Plot)")
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        output_file = output_dir / "confidence_distribution.png"
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Saved: {output_file}")
+
+    def _generate_statistical_report_glaucoma(self, all_data: List[Dict], output_dir: Path) -> None:
+        """Generate comprehensive statistical report."""
+        logger.info("Generating statistical report...")
+        
+        report_lines = []
+        report_lines.append("="*80)
+        report_lines.append("LOGPROBS CONFIDENCE ANALYSIS - STATISTICAL REPORT (3-Type)")
+        report_lines.append("="*80)
+        report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report_lines.append(f"Model: {self.model}")
+        report_lines.append(f"Total Samples Analyzed: {len(all_data)}")
+        report_lines.append("="*80)
+        report_lines.append("")
+        
+        # Per-language statistics
+        for language in sorted(set(d["language"] for d in all_data)):
+            lang_data = [d for d in all_data if d["language"] == language]
+            
+            report_lines.append(f"\n{'='*80}")
+            report_lines.append(f"LANGUAGE: {language.upper()}")
+            report_lines.append(f"{'='*80}")
+            report_lines.append(f"Total Samples: {len(lang_data)}")
+            
+            # Collect all probabilities
+            all_probs = []
+            for data in lang_data:
+                if data["logprobs"]:
+                    all_probs.extend([lp["probability"] for lp in data["logprobs"]])
+            
+            if all_probs:
+                report_lines.append(f"\nToken Confidence Statistics:")
+                report_lines.append(f"  Total Tokens: {len(all_probs):,}")
+                report_lines.append(f"  Mean Confidence: {np.mean(all_probs):.4f}")
+                report_lines.append(f"  Median Confidence: {np.median(all_probs):.4f}")
+                report_lines.append(f"  Std Deviation: {np.std(all_probs):.4f}")
+                report_lines.append(f"  Min Confidence: {np.min(all_probs):.4f}")
+                report_lines.append(f"  Max Confidence: {np.max(all_probs):.4f}")
+                report_lines.append(f"  25th Percentile: {np.percentile(all_probs, 25):.4f}")
+                report_lines.append(f"  75th Percentile: {np.percentile(all_probs, 75):.4f}")
+                low_conf = sum(1 for p in all_probs if p < 0.5)
+                high_conf = sum(1 for p in all_probs if p > 0.8)
+                report_lines.append(f"  Low Confidence Tokens (<0.5): {low_conf} ({low_conf/len(all_probs)*100:.2f}%)")
+                report_lines.append(f"  High Confidence Tokens (>0.8): {high_conf} ({high_conf/len(all_probs)*100:.2f}%)")
+        
+        # Cross-language comparison
+        report_lines.append(f"\n\n{'='*80}")
+        report_lines.append("CROSS-LANGUAGE COMPARISON")
+        report_lines.append(f"{'='*80}")
+        
+        comparison_data = []
+        for language in sorted(set(d["language"] for d in all_data)):
+            lang_data = [d for d in all_data if d["language"] == language]
+            
+            all_probs = []
+            for data in lang_data:
+                if data["logprobs"]:
+                    all_probs.extend([lp["probability"] for lp in data["logprobs"]])
+            
+            if all_probs:
+                comparison_data.append({
+                    "Language": language,
+                    "Mean": np.mean(all_probs),
+                    "Median": np.median(all_probs),
+                    "Std": np.std(all_probs),
+                    "Samples": len(lang_data),
+                })
+        
+        if comparison_data:
+            report_lines.append(f"\n{'Language':<15} {'Mean Conf':>12} {'Median Conf':>12} {'Std Dev':>12} {'Samples':>10}")
+            report_lines.append("-"*65)
+            for row in comparison_data:
+                report_lines.append(f"{row['Language']:<15} {row['Mean']:>12.4f} {row['Median']:>12.4f} {row['Std']:>12.4f} {row['Samples']:>10}")
+        
+        # Best/Worst performers
+        if comparison_data:
+            best = max(comparison_data, key=lambda x: x["Mean"])
+            worst = min(comparison_data, key=lambda x: x["Mean"])
+            most_stable = min(comparison_data, key=lambda x: x["Std"])
+            
+            report_lines.append(f"\n\nKey Findings:")
+            report_lines.append(f"  Highest Mean Confidence: {best['Language']} ({best['Mean']:.4f})")
+            report_lines.append(f"  Lowest Mean Confidence: {worst['Language']} ({worst['Mean']:.4f})")
+            report_lines.append(f"  Most Stable (Lowest Std): {most_stable['Language']} ({most_stable['Std']:.4f})")
+        
+        report_lines.append(f"\n{'='*80}")
+        report_lines.append("END OF REPORT")
+        report_lines.append(f"{'='*80}\n")
+        
+        # Save report
+        report_file = output_dir / "statistical_report.txt"
+        with open(report_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(report_lines))
+        
+        logger.info(f"Saved: {report_file}")
+        
+        # Also print to console
+        print("\n".join(report_lines))
+
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments"""
@@ -1554,8 +2004,8 @@ Examples:
         "--target-language",
         type=str,
         default=None,
-        choices=LanguageConfig.SUPPORTED_LANGUAGES,
-        help="Process specified language (default: English if neither option set)"
+        choices=LanguageConfig.SUPPORTED_LANGUAGES + list(LanguageConfig.LANGUAGE_CODE_MAP.keys()),
+        help="Process specified language: English/Chinese/Malay/Thai or zh/en/ms/th (default: English if neither option set)"
     )
     parser.add_argument(
         "--target-languages",
@@ -1599,6 +2049,16 @@ Examples:
         default="OphthalmologyEHRglaucoma/result/response_3type",
         help="Base output directory (will create model_name/language/roundX.json) (default: %(default)s)"
     )
+    parser.add_argument(
+        "--analyze-logprobs",
+        action="store_true",
+        help="Run logprobs analysis and visualization after processing"
+    )
+    parser.add_argument(
+        "--only-analyze",
+        action="store_true",
+        help="Only run logprobs analysis without processing new samples"
+    )
     
     return parser.parse_args()
 
@@ -1638,16 +2098,34 @@ def main() -> None:
 
     # Process
     try:
-        runner.process(
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            checkpoint_interval=args.checkpoint_interval,
-            rounds=args.rounds,
-            limit=args.limit,
-            target_language=args.target_language,
-            target_languages=args.target_languages,
-            output_base_dir=args.output_dir
-        )
+        # Run main processing unless only-analyze is specified
+        if not args.only_analyze:
+            runner.process(
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                checkpoint_interval=args.checkpoint_interval,
+                rounds=args.rounds,
+                limit=args.limit,
+                target_language=args.target_language,
+                target_languages=args.target_languages,
+                output_base_dir=args.output_dir
+            )
+        
+        # Run logprobs analysis if requested
+        if args.analyze_logprobs or args.only_analyze:
+            # Parse target languages for analysis
+            target_langs_list = None
+            if args.target_languages:
+                target_langs_list = re.split(r'[,\s]+', args.target_languages.strip())
+                target_langs_list = [validate_language(lang.strip()) for lang in target_langs_list if lang.strip()]
+            elif args.target_language:
+                target_langs_list = [validate_language(args.target_language)]
+            
+            runner.analyze_logprobs(
+                output_base_dir=args.output_dir,
+                rounds=args.rounds,
+                target_languages=target_langs_list,
+            )
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         raise SystemExit(0)
