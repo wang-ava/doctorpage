@@ -92,7 +92,7 @@ class DynamicKeywordExtractor:
         return terms
     
     def _tokenize(self, text: str, lang_code: str) -> List[str]:
-        """Simple multilingual tokenization for Chinese/English/Malay/Thai."""
+        """Simple multilingual tokenization for Chinese/English/Malay/Thai/Persian."""
         if not text:
             return []
         
@@ -120,7 +120,8 @@ class DynamicKeywordExtractor:
                    'trabec', 'cataract', 'pacg', 'pacs', 'apac', 'lens', 'subluxation',
                    'trabeculectomy', 'remission', 'secondary'],
             'ms': ['mata', 'pembedahan', 'tekanan', 'glaukoma', 'katarak', 'lensa'],
-            'th': ['\u0e15\u0e32', '\u0e1c\u0e48\u0e32\u0e15\u0e31\u0e14', '\u0e04\u0e27\u0e32\u0e21\u0e14\u0e31\u0e19', '\u0e15\u0e49\u0e2d', '\u0e41\u0e01\u0e49\u0e27\u0e15\u0e32']
+            'th': ['\u0e15\u0e32', '\u0e1c\u0e48\u0e32\u0e15\u0e31\u0e14', '\u0e04\u0e27\u0e32\u0e21\u0e14\u0e31\u0e19', '\u0e15\u0e49\u0e2d', '\u0e41\u0e01\u0e49\u0e27\u0e15\u0e32'],
+            'fa': ['\u0686\u0634\u0645', '\u06af\u0644\u0648\u06a9\u0648\u0645', '\u0641\u0634\u0627\u0631', '\u0639\u0635\u0628', '\u062c\u0631\u0627\u062d\u06cc', '\u0622\u0628', '\u0645\u0631\u0648\u0627\u0631\u06cc\u062f']
         }
         roots = medical_roots.get(lang_code, [])
         return any(root in word for root in roots)
@@ -281,6 +282,7 @@ LOGICAL_CONNECTORS = {
     'en': ['because', 'therefore', 'thus', 'hence', 'so', 'suggests', 'indicates', 'shows', 'thus'],
     'ms': ['kerana', 'oleh itu', 'jadi', 'menunjukkan', 'menandakan'],
     'th': ['\u0e40\u0e1e\u0e23\u0e32\u0e30', '\u0e14\u0e31\u0e07\u0e19\u0e31\u0e49\u0e19', '\u0e08\u0e36\u0e07', '\u0e41\u0e2a\u0e14\u0e07', '\u0e1a\u0e48\u0e07\u0e0a\u0e35\u0e49'],
+    'fa': ['\u0632\u06cc\u0631\u0627', '\u0628\u0646\u0627\u0628\u0631\u0627\u06cc\u0646', '\u062f\u0631 \u0646\u062a\u06cc\u062c\u0647', '\u067e\u0633', '\u0646\u0634\u0627\u0646 \u0645\u06cc\u200c\u062f\u0647\u062f', '\u062d\u0627\u06a9\u06cc \u0627\u0633\u062a'],
 }
 
 # Medical terms used for activation and stability attribution.
@@ -289,6 +291,7 @@ MEDICAL_TERM_PATTERNS = {
     'en': ['glaucoma', 'IOP', 'optic nerve', 'trabeculectomy', 'angle', 'lens', 'cataract', 'surgery'],
     'ms': ['glaukoma', 'tekanan', 'saraf', 'pembedahan', 'katarak', 'lensa'],
     'th': ['\u0e15\u0e49\u0e2d\u0e2b\u0e34\u0e19', '\u0e04\u0e27\u0e32\u0e21\u0e14\u0e31\u0e19', '\u0e40\u0e2a\u0e49\u0e19\u0e1b\u0e23\u0e30\u0e2a\u0e32\u0e17', '\u0e1c\u0e48\u0e32\u0e15\u0e31\u0e14', '\u0e15\u0e49\u0e2d\u0e01\u0e23\u0e30\u0e08\u0e01', '\u0e41\u0e01\u0e49\u0e27\u0e15\u0e32'],
+    'fa': ['\u06af\u0644\u0648\u06a9\u0648\u0645', '\u0641\u0634\u0627\u0631', '\u0639\u0635\u0628 \u0628\u06cc\u0646\u0627\u06cc\u06cc', '\u062a\u0631\u0627\u0628\u06a9\u0648\u0644\u06a9\u062a\u0648\u0645\u06cc', '\u0632\u0627\u0648\u06cc\u0647', '\u0639\u062f\u0633\u06cc', '\u0622\u0628 \u0645\u0631\u0648\u0627\u0631\u06cc\u062f', '\u062c\u0631\u0627\u062d\u06cc'],
 }
 
 # Reasoning phases by normalized token position.
@@ -299,6 +302,7 @@ ANSWER_OPTION_PATTERNS = {
     'en': ['option', 'A', 'B', 'C', 'D', 'first', 'second', 'choice'],
     'ms': ['pilihan', 'A', 'B', 'C', 'D', 'pertama', 'kedua'],
     'th': ['\u0e15\u0e31\u0e27\u0e40\u0e25\u0e37\u0e2d\u0e01', 'A', 'B', 'C', 'D'],
+    'fa': ['\u06af\u0632\u06cc\u0646\u0647', 'A', 'B', 'C', 'D', '\u0627\u0648\u0644', '\u062f\u0648\u0645'],
 }
 # Mutation detection thresholds over token logprob deltas.
 MUTATION_ABSOLUTE_THRESHOLDS = [2.0, 2.5, 3.0]
@@ -327,7 +331,14 @@ LOGIC_BREAK_DROP_THRESHOLD = 1.5
 LOGIC_BREAK_Z_THRESHOLD = 2.0
 LOGIC_BREAK_ABS_LOGPROB_THRESHOLD = -2.5
 LOGIC_BREAK_MAX_RECORDS = 30
-CONCLUSION_CODE_FIELD_KEYS = ['诊断代码', 'diagnosis_code', 'kod_diagnosis', 'รหัสการวินิจฉัย']
+CONCLUSION_CODE_FIELD_KEYS = [
+    '诊断代码',
+    'diagnosis_code',
+    'kod_diagnosis',
+    'รหัสการวินิจฉัย',
+    '\u06a9\u062f_\u062a\u0634\u062e\u06cc\u0635',
+    '\u06a9\u062f \u062a\u0634\u062e\u06cc\u0635',
+]
 
 # English is used as reference-only line in figures.
 ENGLISH_AS_REFERENCE_LINE = True
@@ -337,7 +348,26 @@ LANGUAGE_LABEL_COLORS = {
     'Chinese': '#9B59B6',  # purple
     'Malay': '#3498DB',    # blue
     'Thai': '#27AE60',     # green
+    'Persian': '#E67E22',  # orange
 }
+DEFAULT_PLOT_COLORS = ['#9B59B6', '#27AE60', '#3498DB', '#F39C12', '#E74C3C', '#1ABC9C', '#8E44AD']
+
+
+def _repeat_colors(n: int, palette: List[str] = None) -> List[str]:
+    """Return n colors by cycling through a palette."""
+    palette = palette or DEFAULT_PLOT_COLORS
+    if n <= 0 or not palette:
+        return []
+    return [palette[i % len(palette)] for i in range(n)]
+
+
+def _language_colors(languages: List[str]) -> List[str]:
+    """Stable colors for languages with hardcoded overrides when available."""
+    colors = []
+    fallback = _repeat_colors(len(languages))
+    for i, lang in enumerate(languages):
+        colors.append(LANGUAGE_LABEL_COLORS.get(lang, fallback[i]))
+    return colors
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -686,46 +716,28 @@ class CrossLingualAnalyzer:
 # 9. Cognitive stability analyzer
 # ==========================================
 
-def _token_matches_any_pattern(token_idx: int, patterns: List[str], joined_text: str, spans: List[Tuple[int, int]]) -> bool:
-    """Check whether token at token_idx overlaps any pattern match."""
-    if token_idx < 0 or token_idx >= len(spans):
-        return False
-    token_start, token_end = spans[token_idx]
-    if token_start == token_end:
-        return False
+def _collect_pattern_token_indices(patterns: List[str], joined_text: str, spans: List[Tuple[int, int]]) -> Set[int]:
+    """Collect token indices that overlap any pattern occurrence."""
+    indices: Set[int] = set()
     for pattern in patterns:
-        for match in re.finditer(re.escape(pattern.lower()), joined_text):
-            if match.end() <= token_start or match.start() >= token_end:
-                continue
-            return True
-    return False
+        pattern_l = (pattern or '').strip().lower()
+        if not pattern_l:
+            continue
+        indices.update(_find_pattern_token_indices(pattern_l, joined_text, spans))
+    return indices
 
 
-def _get_token_content_type(token_idx: int, token_text: str, lang_code: str, joined_text: str, spans: List[Tuple[int, int]]) -> str:
+def _get_token_content_type(token_idx: int, token_text: str, medical_indices: Set[int],
+                            logical_indices: Set[int], answer_indices: Set[int]) -> str:
     """Label token as medical/logical/answer/other."""
     t = (token_text or '').strip().lower()
     if t == '':
         return 'other'
-    if _token_matches_any_pattern(
-        token_idx,
-        MEDICAL_TERM_PATTERNS.get(lang_code, []) + MEDICAL_TERM_PATTERNS.get('en', []),
-        joined_text,
-        spans
-    ):
+    if token_idx in medical_indices:
         return 'medical'
-    if _token_matches_any_pattern(
-        token_idx,
-        LOGICAL_CONNECTORS.get(lang_code, []) + LOGICAL_CONNECTORS.get('en', []),
-        joined_text,
-        spans
-    ):
+    if token_idx in logical_indices:
         return 'logical'
-    if _token_matches_any_pattern(
-        token_idx,
-        ANSWER_OPTION_PATTERNS.get(lang_code, []) + ANSWER_OPTION_PATTERNS.get('en', []),
-        joined_text,
-        spans
-    ):
+    if token_idx in answer_indices:
         return 'answer'
     return 'other'
 
@@ -769,6 +781,12 @@ class CognitiveStabilityAnalyzer:
         raw_logprobs = [_get_logprob(item) for item in logprobs_data]
         logprobs = np.array([(lp if np.isfinite(lp) else -999.0) for lp in raw_logprobs], dtype=float)
         tokens = [t.strip() for t in tokens_raw]
+        medical_patterns = MEDICAL_TERM_PATTERNS.get(lang_code, []) + MEDICAL_TERM_PATTERNS.get('en', [])
+        logical_patterns = LOGICAL_CONNECTORS.get(lang_code, []) + LOGICAL_CONNECTORS.get('en', [])
+        answer_patterns = ANSWER_OPTION_PATTERNS.get(lang_code, []) + ANSWER_OPTION_PATTERNS.get('en', [])
+        medical_indices = _collect_pattern_token_indices(medical_patterns, joined_text, spans)
+        logical_indices = _collect_pattern_token_indices(logical_patterns, joined_text, spans)
+        answer_indices = _collect_pattern_token_indices(answer_patterns, joined_text, spans)
         for pos, lp in enumerate(logprobs):
             bin_idx = min(int((pos / n) * 10), 9)
             self.binned_logprobs[bin_idx].append(float(lp))
@@ -785,7 +803,9 @@ class CognitiveStabilityAnalyzer:
             abs_d = abs(d)
             pos_frac = (i + 0.5) / n
             phase = _get_phase_at_position(pos_frac)
-            content = _get_token_content_type(i + 1, tokens[i + 1], lang_code, joined_text, spans) if i + 1 < len(tokens) else 'other'
+            content = _get_token_content_type(
+                i + 1, tokens[i + 1], medical_indices, logical_indices, answer_indices
+            ) if i + 1 < len(tokens) else 'other'
             
             is_mutation_primary = abs_d >= primary_threshold
             if is_mutation_primary:
@@ -867,6 +887,8 @@ class CognitiveStabilityAnalyzer:
             counts_primary.append(r['mutation_count'])
         correct_counts = self.by_correct.get(True, [])
         incorrect_counts = self.by_correct.get(False, [])
+        correct_stability = [r['stability_score'] for r in self.per_sample_records if r['is_correct']]
+        incorrect_stability = [r['stability_score'] for r in self.per_sample_records if not r['is_correct']]
         return {
             'mutation_count_mean': np.mean(counts_primary) if counts_primary else 0,
             'mutation_count_std': np.std(counts_primary) if len(counts_primary) > 1 else 0,
@@ -880,8 +902,8 @@ class CognitiveStabilityAnalyzer:
             'by_correct': {
                 'correct_mean_count': np.mean(correct_counts) if correct_counts else 0,
                 'incorrect_mean_count': np.mean(incorrect_counts) if incorrect_counts else 0,
-                'correct_mean_stability': np.mean([r['stability_score'] for r in self.per_sample_records if r['is_correct']]) or 0,
-                'incorrect_mean_stability': np.mean([r['stability_score'] for r in self.per_sample_records if not r['is_correct']]) or 0,
+                'correct_mean_stability': np.mean(correct_stability) if correct_stability else 0,
+                'incorrect_mean_stability': np.mean(incorrect_stability) if incorrect_stability else 0,
             },
             'by_threshold': {str(th): np.mean(self.mutation_counts_by_threshold[th]) if self.mutation_counts_by_threshold[th] else 0 for th in self.absolute_thresholds},
             'relative_threshold_mean': np.mean(self.mutation_counts_by_threshold['relative']) if self.mutation_counts_by_threshold['relative'] else 0,
@@ -1193,13 +1215,13 @@ def _json_serializable(obj):
     return obj
 
 def get_language_code(language: str) -> str:
-    mapping = {'Chinese': 'zh', 'English': 'en', 'Malay': 'ms', 'Thai': 'th'}
+    mapping = {'Chinese': 'zh', 'English': 'en', 'Malay': 'ms', 'Thai': 'th', 'Persian': 'fa'}
     return mapping.get(language, 'en')
 
 
 def _ordered_languages(languages: List[str]) -> List[str]:
     """Keep preferred language order for plots/tables."""
-    preferred = ['Chinese', 'English', 'Malay', 'Thai']
+    preferred = ['Chinese', 'English', 'Malay', 'Persian', 'Thai']
     existing = set(languages)
     return [l for l in preferred if l in existing] + sorted([l for l in existing if l not in preferred])
 
@@ -1699,9 +1721,18 @@ def extract_diagnosis_codes(result: Dict) -> Tuple[Dict, Dict]:
     predicted, ground_truth = {}, {}
     parsed_response = result.get('output', {}).get('parsed_response', {})
     
-    od_keys = ['\u53f3\u773c', 'Right Eye', 'right eye', 'right_eye', 'OD', 'Right', 'mata_kanan', '\u0e15\u0e32\u0e02\u0e27\u0e32']
-    os_keys = ['\u5de6\u773c', 'Left Eye', 'left eye', 'left_eye', 'OS', 'Left', 'mata_kiri', '\u0e15\u0e32\u0e0b\u0e49\u0e32\u0e22']
-    code_keys = ['\u8bca\u65ad\u4ee3\u7801', 'diagnosis_code', 'kod_diagnosis', '\u0e23\u0e2b\u0e31\u0e2a\u0e01\u0e32\u0e23\u0e27\u0e34\u0e19\u0e34\u0e08\u0e09\u0e31\u0e22']
+    od_keys = [
+        '\u53f3\u773c', 'Right Eye', 'right eye', 'right_eye', 'OD', 'Right', 'mata_kanan', '\u0e15\u0e32\u0e02\u0e27\u0e32',
+        '\u0686\u0634\u0645_\u0631\u0627\u0633\u062a', '\u0686\u0634\u0645 \u0631\u0627\u0633\u062a'
+    ]
+    os_keys = [
+        '\u5de6\u773c', 'Left Eye', 'left eye', 'left_eye', 'OS', 'Left', 'mata_kiri', '\u0e15\u0e32\u0e0b\u0e49\u0e32\u0e22',
+        '\u0686\u0634\u0645_\u0686\u067e', '\u0686\u0634\u0645 \u0686\u067e'
+    ]
+    code_keys = [
+        '\u8bca\u65ad\u4ee3\u7801', 'diagnosis_code', 'kod_diagnosis', '\u0e23\u0e2b\u0e31\u0e2a\u0e01\u0e32\u0e23\u0e27\u0e34\u0e19\u0e34\u0e08\u0e09\u0e31\u0e22',
+        '\u06a9\u062f_\u062a\u0634\u062e\u06cc\u0635', '\u06a9\u062f \u062a\u0634\u062e\u06cc\u0635'
+    ]
 
     def find_code(eye_keys):
         for ek in eye_keys:
@@ -1871,7 +1902,7 @@ def plot_diagnosis_stratified_performance(all_data: Dict[str, Dict], output_path
     categories = DIAGNOSIS_CATEGORY_ORDER + extra_categories
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     fig.suptitle(f'Disease-Stratified Performance: {method_name}', fontsize=_PLOT_FONTSIZE_SUPTITLE, fontweight='bold')
-    colors = ['#9B59B6', '#27AE60', '#3498DB', '#F39C12'][:len(languages)]
+    colors = _language_colors(display_languages)
     x = np.arange(len(categories))
     width = 0.8 / max(len(display_languages), 1)
     all_accs_flat = []
@@ -1906,7 +1937,7 @@ def plot_diagnosis_stratified_combined(all_data_by_method: Dict[str, Dict], outp
         return
     extra_categories = sorted([c for c in all_categories if c not in DIAGNOSIS_CATEGORY_ORDER])
     categories = DIAGNOSIS_CATEGORY_ORDER + extra_categories
-    colors = ['#9B59B6', '#27AE60', '#3498DB', '#F39C12'][:len(languages)]
+    colors = _language_colors(display_languages)
     x = np.arange(len(categories))
     width = 0.8 / max(len(display_languages), 1)
     all_accs_flat = []
@@ -2029,7 +2060,7 @@ def plot_confidence_analysis(all_data_by_method: Dict[str, Dict], output_path: P
     data0 = all_data_by_method[method_keys[0]]
     languages = sorted(data0.keys())
     display_languages = [l for l in languages if l not in DISPLAY_LANGUAGES_EXCLUDE]
-    colors = ['#9B59B6', '#27AE60', '#3498DB', '#F39C12'][:len(display_languages)]
+    colors = _language_colors(display_languages)
     
     n_methods = len(method_keys)
     fig, axes = plt.subplots(n_methods, 3, figsize=(14, 5 * n_methods))
@@ -2118,7 +2149,7 @@ def plot_accuracy_comparison(
     fig, ax = plt.subplots(figsize=(12, 7))
     x = np.arange(len(display_languages))
     width = 0.8 / max(len(method_keys), 1)
-    colors = ['#1F77B4', '#2CA02C', '#FF7F0E', '#9467BD'][:len(method_keys)]
+    colors = _repeat_colors(len(method_keys), ['#1F77B4', '#2CA02C', '#FF7F0E', '#9467BD'])
 
     all_vals = []
     for i, key in enumerate(method_keys):
@@ -2689,7 +2720,7 @@ def plot_cross_lingual_analysis(all_data_by_method: Dict[str, Dict], output_path
         concepts = list(alignment_data.keys())
         x = np.arange(len(display_languages))
         w = 0.8 / len(concepts)
-        colors = ['#9B59B6', '#27AE60', '#3498DB', '#F39C12'][:len(concepts)]
+        colors = _repeat_colors(len(concepts))
         for i, c in enumerate(concepts):
             vals = [alignment_data[c].get(l, 0) for l in display_languages]
             bars_al = axes[0].bar(x + (i - len(concepts)/2 + 0.5) * w, vals, w, label=c, color=colors[i % len(colors)], alpha=0.8)
@@ -2713,7 +2744,7 @@ def plot_cross_lingual_analysis(all_data_by_method: Dict[str, Dict], output_path
     if cs_ratios:
         x = np.arange(len(display_languages))
         cs_vals = [cs_ratios.get(l, 0) for l in display_languages]
-        bars_cs = axes[1].bar(x, cs_vals, color=['#9B59B6', '#27AE60', '#3498DB'][:len(display_languages)], alpha=0.8)
+        bars_cs = axes[1].bar(x, cs_vals, color=_language_colors(display_languages), alpha=0.8)
         for bar, val in zip(bars_cs, cs_vals):
             axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02, f'{val:.2f}', ha='center', va='bottom', fontsize=_PLOT_FONTSIZE_LABEL)
         axes[1].set_xticks(x)
@@ -2796,7 +2827,7 @@ def plot_stability_heatmap(all_data_by_method: Dict[str, Dict], output_path: Pat
     if not method_keys:
         return
 
-    preferred_languages = ['Chinese', 'English', 'Malay', 'Thai']
+    preferred_languages = ['Chinese', 'English', 'Malay', 'Persian', 'Thai']
     language_set = set()
     for key in method_keys:
         language_set.update(all_data_by_method.get(key, {}).keys())
@@ -2917,7 +2948,7 @@ def plot_stability_metrics_summary(all_data_by_method: Dict[str, Dict], output_p
     fig.suptitle('Cognitive Stability Metrics Summary', fontsize=_PLOT_FONTSIZE_SUPTITLE, fontweight='bold')
     x = np.arange(len(display_languages))
     w = 0.8 / max(len(method_keys), 1)
-    colors = ['#9B59B6', '#27AE60', '#3498DB', '#F39C12', '#E74C3C'][:max(len(method_keys), 1)]
+    colors = _repeat_colors(max(len(method_keys), 1))
     
     for row, key in enumerate(method_keys):
         data = all_data_by_method[key]
@@ -2978,6 +3009,21 @@ DATASET_METHODS = {
         ('translate_pivot', 'response_3type_back_in_english', 'Translation Pivot')
     ],
 }
+
+
+def discover_available_languages(base_dir: Path, methods_config: List[Tuple[str, str, str]], model: str) -> List[str]:
+    """Discover available languages for one model from all method folders."""
+    languages = set()
+    for _, folder, _ in methods_config:
+        model_dir = base_dir / folder / model
+        if not model_dir.exists() or not model_dir.is_dir():
+            continue
+        for lang_dir in model_dir.iterdir():
+            if not lang_dir.is_dir():
+                continue
+            if (lang_dir / 'round1.json').exists():
+                languages.add(lang_dir.name)
+    return _ordered_languages(list(languages))
 
 
 def _export_method_summary_json(method_stats: Dict[str, Dict], out_path: Path):
@@ -3248,7 +3294,12 @@ def main():
     parser.add_argument('--base_dir', type=str, default='/mnt/data3/yuqian/OphthalmologyEHRglaucoma/result')
     parser.add_argument('--output_dir', type=str, default='/mnt/data3/yuqian/OphthalmologyEHRglaucoma/result/improved_analysis')
     parser.add_argument('--model', type=str, default='openai_gpt-4o')
-    parser.add_argument('--languages', nargs='+', default=['Chinese', 'English', 'Malay', 'Thai'])
+    parser.add_argument(
+        '--languages',
+        nargs='+',
+        default=None,
+        help='Languages to analyze. Omit (or pass "all") to auto-discover all available languages for the model.'
+    )
     parser.add_argument('--dataset', choices=['2type', '3type', 'both'], default='both',
                         help='Which dataset family to analyze. "both" runs two independent analyses.')
     args = parser.parse_args()
@@ -3264,9 +3315,26 @@ def main():
 
     print(f"Starting Improved Analysis for model: {args.model}")
     print(f"Selected dataset scope: {', '.join(dataset_keys)}")
+    requested_languages = args.languages or []
+    use_all_languages = (not requested_languages) or any(str(x).strip().lower() == 'all' for x in requested_languages)
+
+    explicit_languages = []
+    if not use_all_languages:
+        seen = set()
+        for lang in requested_languages:
+            lang = str(lang).strip()
+            if not lang or lang in seen:
+                continue
+            explicit_languages.append(lang)
+            seen.add(lang)
 
     for dataset_key in dataset_keys:
         methods_config = DATASET_METHODS[dataset_key]
+        languages = discover_available_languages(base_dir, methods_config, args.model) if use_all_languages else explicit_languages
+        if not languages:
+            print(f"[!] Skip {dataset_key}: no available languages found for model {args.model}")
+            continue
+        print(f"Languages for {dataset_key}: {', '.join(languages)}")
         dataset_out_dir = output_root / dataset_key
         dataset_out_dir.mkdir(parents=True, exist_ok=True)
         run_analysis_for_dataset(
@@ -3275,7 +3343,7 @@ def main():
             base_dir=base_dir,
             out_dir=dataset_out_dir,
             model=args.model,
-            languages=args.languages,
+            languages=languages,
         )
 
     print(f"\nAll tasks completed. Results saved under: {output_root}")
