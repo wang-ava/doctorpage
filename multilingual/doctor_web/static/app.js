@@ -508,7 +508,7 @@ function renderPipelineFigure(analytics) {
   pipelineFigure.innerHTML = `
     <div class="pipeline-figure-shell">
       <svg class="chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Full pipeline confidence figure">
-        <rect x="0" y="0" width="${width}" height="${height}" rx="20" fill="#ffffff" stroke="rgba(22,47,39,0.08)"></rect>
+        <rect x="0" y="0" width="${width}" height="${height}" rx="20" fill="#fafbfc" stroke="#e5e7eb"></rect>
         <text class="chart-label" x="${left}" y="52">Workflow confidence trend</text>
         <text class="chart-note" x="${left}" y="${lineBottom + 24}">Top: average token confidence by position. Bottom: stage heatmaps. Amber markers show notable confidence drops.</text>
         <line x1="${left}" y1="${lineBottom}" x2="${width - right}" y2="${lineBottom}" stroke="rgba(22,47,39,0.18)" />
