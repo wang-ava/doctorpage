@@ -411,9 +411,9 @@ function renderPipelineFigure(analytics) {
   }
 
   const compactStageLabels = {
-    "Input Translation": "Input Translation",
-    "English Answer": "English Answer",
-    "Back-translation": "Answer Translation",
+    "Input Translation": "Input",
+    "English Answer": "Answer",
+    "Back-translation": "Return",
   };
 
   const width = 1600;
@@ -457,23 +457,23 @@ function renderPipelineFigure(analytics) {
     }
     const label = analytics.stages?.filter((stage) => stage.available)[index]?.label || `Stage ${index + 1}`;
     const displayLabel = compactStageLabels[label] || label;
-    const labelLines = displayLabel.split(" ");
-    const longestLineLength = Math.max(...labelLines.map((item) => item.length));
+    const labelLines = [displayLabel];
+    const longestLineLength = displayLabel.length;
     const stageWidth = endX - startX;
-    const pillWidth = Math.min(stageWidth - 24, Math.max(82, longestLineLength * 7.6 + 22));
-    const pillHeight = labelLines.length > 1 ? 38 : 30;
-    const pillY = labelLines.length > 1 ? 8 : 11;
-    const textY = labelLines.length > 1 ? 19 : 30;
+    const pillWidth = Math.min(stageWidth - 30, Math.max(62, longestLineLength * 7.1 + 18));
+    const pillHeight = 24;
+    const pillY = 14;
+    const textY = 30;
     const pillX = ((startX + endX) / 2) - pillWidth / 2;
     const textContent = labelLines
       .map(
         (line, lineIndex) =>
-          `<text class="chart-stage-text" x="${((startX + endX) / 2).toFixed(2)}" y="${textY + lineIndex * 13}" text-anchor="middle">${escapeHtml(line)}</text>`
+          `<text class="chart-stage-text" x="${((startX + endX) / 2).toFixed(2)}" y="${textY + lineIndex * 12}" text-anchor="middle">${escapeHtml(line)}</text>`
       )
       .join("");
     stageLabels.push(
       `<g>
-        <rect class="chart-stage-pill" x="${pillX.toFixed(2)}" y="${pillY}" width="${pillWidth.toFixed(2)}" height="${pillHeight}" rx="14"></rect>
+        <rect class="chart-stage-pill" x="${pillX.toFixed(2)}" y="${pillY}" width="${pillWidth.toFixed(2)}" height="${pillHeight}" rx="12"></rect>
         ${textContent}
       </g>`
     );
@@ -493,11 +493,7 @@ function renderPipelineFigure(analytics) {
     .map((row, rowIndex) => {
       const y = heatmapTop + rowIndex * rowHeight + rowHeight / 2 + 2;
       const displayLabel = compactStageLabels[row.label] || row.label;
-      const lines = displayLabel.split(" ");
-      const badgeLines = lines
-        .map((line) => `<span>${escapeHtml(line)}</span>`)
-        .join("");
-      return `<div class="pipeline-row-badge" style="top: ${((y / height) * 100).toFixed(3)}%;">${badgeLines}</div>`;
+      return `<div class="pipeline-row-badge" style="top: ${((y / height) * 100).toFixed(3)}%;"><span>${escapeHtml(displayLabel)}</span></div>`;
     })
     .join("");
 

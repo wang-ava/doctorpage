@@ -997,10 +997,10 @@ input[type="text"]:focus {
 
 .chart-stage-text {
   fill: var(--ink);
-  font-size: 12px;
+  font-size: 10.5px;
   font-family: var(--font-sans);
   font-weight: 600;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.02em;
 }
 
 .pipeline-figure-shell {
@@ -1015,24 +1015,27 @@ input[type="text"]:focus {
 
 .pipeline-row-badge {
   position: absolute;
-  left: 14px;
+  left: 10px;
   transform: translateY(-50%);
-  display: grid;
-  gap: 3px;
-  width: 144px;
-  padding: var(--space-3);
-  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 92px;
+  min-height: 26px;
+  padding: 0.35rem 0.55rem;
+  border-radius: 999px;
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid rgba(18, 79, 78, 0.12);
-  box-shadow: 0 10px 24px rgba(17, 53, 49, 0.08);
+  box-shadow: 0 8px 18px rgba(17, 53, 49, 0.06);
 }
 
 .pipeline-row-badge span {
   display: block;
   color: var(--ink);
-  font-size: 0.7rem;
+  font-size: 0.64rem;
   font-weight: 600;
-  line-height: 1.1;
+  line-height: 1;
+  letter-spacing: 0.02em;
   white-space: nowrap;
 }
 
