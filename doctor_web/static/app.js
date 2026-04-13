@@ -460,10 +460,10 @@ function renderPipelineFigure(analytics) {
     const labelLines = displayLabel.split(" ");
     const longestLineLength = Math.max(...labelLines.map((item) => item.length));
     const stageWidth = endX - startX;
-    const pillWidth = Math.min(stageWidth - 18, Math.max(96, longestLineLength * 8.6 + 30));
-    const pillHeight = labelLines.length > 1 ? 44 : 32;
-    const pillY = labelLines.length > 1 ? 6 : 10;
-    const textY = labelLines.length > 1 ? 19 : 31;
+    const pillWidth = Math.min(stageWidth - 24, Math.max(82, longestLineLength * 7.6 + 22));
+    const pillHeight = labelLines.length > 1 ? 38 : 30;
+    const pillY = labelLines.length > 1 ? 8 : 11;
+    const textY = labelLines.length > 1 ? 19 : 30;
     const pillX = ((startX + endX) / 2) - pillWidth / 2;
     const textContent = labelLines
       .map(
@@ -473,7 +473,7 @@ function renderPipelineFigure(analytics) {
       .join("");
     stageLabels.push(
       `<g>
-        <rect class="chart-stage-pill" x="${pillX.toFixed(2)}" y="${pillY}" width="${pillWidth.toFixed(2)}" height="${pillHeight}" rx="16"></rect>
+        <rect class="chart-stage-pill" x="${pillX.toFixed(2)}" y="${pillY}" width="${pillWidth.toFixed(2)}" height="${pillHeight}" rx="14"></rect>
         ${textContent}
       </g>`
     );
