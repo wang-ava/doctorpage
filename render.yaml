@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: doctor-language-bridge
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn doctor_web.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/meta
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: OPENROUTER_MODEL
+        value: openai/gpt-4o
+      - key: OPENROUTER_SITE_NAME
+        value: Doctor Language Bridge
+      - key: OPENROUTER_PORTAL_URL
+        value: https://openrouter.ai/
+      - key: DOCTOR_WEB_MAX_INPUT_CHARS
+        value: "12000"
+      - key: DOCTOR_WEB_MAX_IMAGE_COUNT
+        value: "4"
+      - key: DOCTOR_WEB_TOP_LOGPROBS
+        value: "5"

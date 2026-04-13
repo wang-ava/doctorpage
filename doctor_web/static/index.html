@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Doctor Language Bridge</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="edition-bar">
+        <div class="edition-brand">
+          <span class="edition-mark">Doctor Language Bridge</span>
+          <span class="edition-season">Clinical Communication</span>
+        </div>
+        <nav class="edition-nav" aria-label="Page sections">
+          <a class="edition-link" href="#startPanel">Start</a>
+          <a class="edition-link" href="#resultsShell">Answer</a>
+          <a class="edition-link" href="#advancedReview">Advanced</a>
+        </nav>
+        <span class="edition-note">User-provided OpenRouter API</span>
+      </section>
+
+      <section class="hero hero-compact">
+        <div class="hero-copy">
+          <p class="eyebrow">Multilingual Clinical Support</p>
+          <h1 class="hero-title">
+            Ask a clinical question in any language and review a translated answer you can check.
+          </h1>
+          <p class="hero-description">
+            This page is for multilingual case communication. Add your own OpenRouter API key, enter the case
+            question, optionally attach images, and run the analysis.
+          </p>
+          <div class="hero-actions">
+            <a class="hero-link" href="#startPanel">Start here</a>
+          </div>
+        </div>
+
+        <div class="safety-notice">
+          <strong>Disclaimer:</strong> This is a communication aid, not a diagnostic tool. Clinical decisions should always be reviewed by a qualified clinician. Do not paste directly identifying patient information.
+        </div>
+      </section>
+
+      <section class="workspace workspace-main">
+        <section class="panel input-panel input-panel-wide" id="startPanel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Start</p>
+              <h2>Enter the case and run the analysis</h2>
+              <p class="panel-intro">
+                The main workflow is simple: add your API key, enter the question, attach images if needed,
+                then run.
+              </p>
+            </div>
+          </div>
+
+          <div class="compact-note">
+            <strong>Before you start</strong>
+            <p>
+              This page requires your own
+              <a href="https://openrouter.ai/" target="_blank" rel="noreferrer">OpenRouter API key</a>.
+              The key is forwarded only with your request and is not stored by the server.
+            </p>
+          </div>
+
+          <label class="field">
+            <div class="field-head">
+              <span>OpenRouter API key</span>
+              <span class="pill subtle" id="apiKeyStatus">Required</span>
+            </div>
+            <input
+              id="apiKeyInput"
+              type="password"
+              inputmode="text"
+              spellcheck="false"
+              autocapitalize="off"
+              autocomplete="off"
+              placeholder="Paste your OpenRouter API key here"
+            />
+            <p class="field-note">
+              Create an account at <a href="https://openrouter.ai/" target="_blank" rel="noreferrer">OpenRouter</a>,
+              generate an API key, and paste it here. On this browser, the last key you used is filled in
+              automatically next time.
+            </p>
+          </label>
+
+          <label class="field">
+            <span>Clinical question</span>
+            <textarea
+              id="questionInput"
+              placeholder="Example: Based on this chest image and the history below, identify the most likely diagnosis and list the urgent risks that should be ruled out first."
+              rows="8"
+            ></textarea>
+          </label>
+
+          <label class="field">
+            <span>Clinical images (optional)</span>
+            <input id="imageInput" class="native-file-input" type="file" accept="image/*" multiple />
+            <div class="file-picker">
+              <button id="imagePickerButton" class="secondary-button" type="button">Choose files</button>
+              <span id="imagePickerStatus" class="file-picker-status">No files selected</span>
+            </div>
+          </label>
+
+          <div id="imagePreview" class="image-preview"></div>
+
+          <div class="actions">
+            <button id="submitButton" class="primary-button" type="button">Run analysis</button>
+            <p class="helper-text">
+              The answer view appears after you submit. Advanced confidence review is available separately and does
+              not need to be opened for routine use.
+            </p>
+          </div>
+        </section>
+
+        <aside class="panel pipeline-panel status-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Processing</p>
+              <h2>Processing log</h2>
+              <p class="panel-intro">
+                This log stays visible while the case is running so you can confirm the request is being processed.
+              </p>
+            </div>
+            <span class="pill" id="pipelineBadge">Ready</span>
+          </div>
+
+          <div class="step-row">
+            <div class="step-chip" data-step="detect_language">1. Detect language</div>
+            <div class="step-chip" data-step="translate_input">2. Translate input</div>
+            <div class="step-chip" data-step="answer_in_english">3. Answer in English</div>
+            <div class="step-chip" data-step="translate_answer_back">4. Translate back</div>
+          </div>
+
+          <div class="activity-feed" id="activityFeed"></div>
+        </aside>
+      </section>
+
+      <section class="results-shell is-prerun" id="resultsShell">
+        <section class="panel result-overview">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Answer</p>
+              <h2>Review the answer first</h2>
+              <p class="panel-intro">
+                Start with the English answer and the answer returned to the original language. Open the advanced
+                review only if you need process detail or confidence charts.
+              </p>
+            </div>
+          </div>
+
+          <div class="result-overview-grid">
+            <article class="result-card result-card-feature summary-card">
+              <div class="result-head">
+                <h3>Input language</h3>
+                <span class="pill subtle" id="languageBadge">Not checked</span>
+              </div>
+              <p class="result-copy" id="languageRationale">
+                After you run an analysis, this area will summarize the detected language and any note that may need
+                review.
+              </p>
+            </article>
+
+            <article class="result-card result-card-editorial support-card">
+              <div class="result-head">
+                <h3>English version of the question</h3>
+                <span class="pill subtle" id="translationState">Idle</span>
+              </div>
+              <div class="result-copy live-output markdown-output" id="translatedQuestion"></div>
+            </article>
+
+            <article class="result-card result-card-feature primary-answer">
+              <div class="result-head">
+                <h3>English answer</h3>
+                <span class="pill subtle" id="answerState">Idle</span>
+              </div>
+              <div class="result-copy live-output markdown-output" id="englishAnswer"></div>
+            </article>
+
+            <article class="result-card result-card-editorial secondary-answer">
+              <div class="result-head">
+                <h3>Answer in the original language</h3>
+                <span class="pill subtle" id="backTranslationState">Idle</span>
+              </div>
+              <div class="result-copy live-output markdown-output" id="translatedAnswer"></div>
+            </article>
+          </div>
+        </section>
+
+        <!-- Token Uncertainty Curve: Full-width hero panel -->
+        <section class="panel uncertainty-hero-panel" id="uncertaintyHero" aria-label="Token uncertainty curve">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Confidence</p>
+              <h2>Token Uncertainty Curve</h2>
+              <p class="panel-intro">
+                This chart shows where token confidence drops across the workflow. Higher curves indicate lower certainty at those positions.
+              </p>
+            </div>
+            <span class="pill subtle" id="perplexityState">Waiting for data</span>
+          </div>
+          <div class="uncertainty-figure" id="perplexityFigure"></div>
+          <p class="result-copy" id="perplexitySummary">
+            This chart shows where token uncertainty begins to rise within each stage.
+          </p>
+        </section>
+
+        <details class="panel advanced-review" id="advancedReview">
+          <summary class="advanced-summary">
+            <div>
+              <p class="panel-kicker">Advanced</p>
+              <h2>Advanced review</h2>
+              <p class="panel-intro">
+                Open this section for workflow-level confidence patterns and deeper token diagnostics after the main answer is ready.
+              </p>
+            </div>
+          </summary>
+
+          <div class="advanced-grid">
+            <section class="panel answer-lane">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">Confidence</p>
+                  <h2>Token review</h2>
+                  <p class="panel-intro">Use this section when you want a closer look at token-level confidence and uncertainty.</p>
+                </div>
+                <span class="pill subtle" id="logprobState">Waiting for answer</span>
+              </div>
+
+              <article class="result-card result-card-metrics">
+                <div class="metric-grid">
+                  <div class="metric-card">
+                    <span>Average token confidence</span>
+                    <strong id="metricAvgProb">-</strong>
+                  </div>
+                  <div class="metric-card">
+                    <span>Uncertainty score</span>
+                    <strong id="metricPerplexity">-</strong>
+                  </div>
+                  <div class="metric-card">
+                    <span>Lower-confidence tokens</span>
+                    <strong id="metricLowConfidence">-</strong>
+                  </div>
+                  <div class="metric-card">
+                    <span>Total tokens</span>
+                    <strong id="metricTotalTokens">-</strong>
+                  </div>
+                </div>
+              </article>
+
+              <article class="result-card result-card-editorial">
+                <div class="result-head">
+                  <h3>Token confidence heatmap</h3>
+                  <span class="legend">Darker red tokens are less certain; hover to inspect alternatives.</span>
+                </div>
+                <div class="token-stream" id="tokenStream"></div>
+              </article>
+            </section>
+
+            <section class="panel confidence-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">Workflow confidence</p>
+                  <h2>Workflow review</h2>
+                  <p class="panel-intro">These charts help you review confidence trends across translation, answer generation, and answer return.</p>
+                </div>
+                <span class="pill subtle" id="pipelineAnalyticsState">Waiting for completion</span>
+              </div>
+
+              <article class="result-card result-card-hero workflow-chart">
+                <div class="result-head">
+                  <h3>Workflow confidence overview</h3>
+                  <span class="legend">Top: the confidence trend across the full run. Bottom: stage heatmaps with highlighted drop points.</span>
+                </div>
+                <div class="figure-frame" id="pipelineFigure">
+                  <p class="empty-state">After submission, this area will show a staged confidence overview for the full run.</p>
+                </div>
+              </article>
+
+              <div class="analysis-grid">
+                <article class="result-card result-card-editorial">
+                  <div class="result-head">
+                    <h3>Confidence drop events</h3>
+                    <span class="pill subtle" id="logicBreakState">Waiting for data</span>
+                  </div>
+                  <div class="metric-grid compact-grid">
+                    <div class="metric-card">
+                      <span>Detected drops</span>
+                      <strong id="logicBreakCount">-</strong>
+                    </div>
+                    <div class="metric-card">
+                      <span>Drop rate</span>
+                      <strong id="logicBreakRate">-</strong>
+                    </div>
+                  </div>
+                  <div class="event-list" id="logicBreakList"></div>
+                </article>
+
+                <article class="result-card result-card-editorial">
+                  <div class="result-head">
+                    <h3>Large confidence shifts</h3>
+                    <span class="pill subtle" id="mutationState">Waiting for data</span>
+                  </div>
+                  <div class="metric-grid compact-grid">
+                    <div class="metric-card">
+                      <span>Total shifts</span>
+                      <strong id="mutationCount">-</strong>
+                    </div>
+                    <div class="metric-card">
+                      <span>Shift rate</span>
+                      <strong id="mutationRate">-</strong>
+                    </div>
+                  </div>
+                  <div class="bar-figure" id="mutationFigure"></div>
+                  <p class="result-copy" id="mutationSummary">This panel highlights large confidence shifts by stage so it is easier to spot unstable sections of the response.</p>
+                </article>
+              </div>
+            </section>
+          </div>
+        </details>
+      </section>
+    </main>
+
+    <template id="activityItemTemplate">
+      <div class="activity-item">
+        <span class="activity-dot"></span>
+        <div>
+          <p class="activity-title"></p>
+          <p class="activity-message"></p>
+        </div>
+      </div>
+    </template>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
