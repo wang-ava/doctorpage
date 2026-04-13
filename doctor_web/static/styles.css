@@ -710,7 +710,8 @@ input[type="text"]:focus {
 }
 
 .primary-answer,
-.secondary-answer {
+.secondary-answer,
+.statement-review-card {
   grid-column: 1 / -1;
 }
 
@@ -720,6 +721,91 @@ input[type="text"]:focus {
 
 .secondary-answer {
   border-left: 3px solid var(--border-strong);
+}
+
+.statement-review-card {
+  border-left: 3px solid rgba(13, 148, 136, 0.24);
+}
+
+.statement-list {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.statement-item {
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(246, 249, 247, 0.98) 100%);
+}
+
+.statement-item[data-state="stable"] {
+  border-color: rgba(13, 148, 136, 0.22);
+  background: linear-gradient(180deg, rgba(239, 250, 248, 0.92) 0%, rgba(247, 251, 250, 0.98) 100%);
+}
+
+.statement-item[data-state="review"] {
+  border-color: rgba(245, 158, 11, 0.22);
+  background: linear-gradient(180deg, rgba(255, 248, 235, 0.92) 0%, rgba(252, 249, 243, 0.98) 100%);
+}
+
+.statement-item[data-state="careful"] {
+  border-color: rgba(239, 68, 68, 0.2);
+  background: linear-gradient(180deg, rgba(254, 242, 242, 0.9) 0%, rgba(252, 247, 246, 0.98) 100%);
+}
+
+.statement-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.statement-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.statement-item[data-state="stable"] .statement-label {
+  background: rgba(13, 148, 136, 0.12);
+  color: #0f766e;
+}
+
+.statement-item[data-state="review"] .statement-label {
+  background: rgba(245, 158, 11, 0.12);
+  color: #b45309;
+}
+
+.statement-item[data-state="careful"] .statement-label {
+  background: rgba(239, 68, 68, 0.1);
+  color: #b91c1c;
+}
+
+.statement-metrics {
+  font-size: 0.78rem;
+  color: var(--ink-muted);
+}
+
+.statement-text {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.93rem;
+  line-height: 1.72;
+}
+
+.statement-note {
+  margin: var(--space-2) 0 0;
+  color: var(--ink-muted);
+  font-size: 0.82rem;
+  line-height: 1.6;
 }
 
 /* ============================================================
@@ -836,6 +922,33 @@ input[type="text"]:focus {
   max-width: 60rem;
 }
 
+.workflow-stage-glossary {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.stage-note {
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(18, 79, 78, 0.12);
+  box-shadow: 0 12px 30px rgba(17, 53, 49, 0.05);
+}
+
+.stage-note h3 {
+  margin: 0 0 var(--space-2);
+  color: var(--ink);
+  font-size: 0.95rem;
+}
+
+.stage-note p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
 .workflow-chart {
   background: linear-gradient(180deg, rgba(244, 249, 248, 0.96) 0%, rgba(252, 249, 243, 0.98) 100%);
   border: 1px solid rgba(18, 79, 78, 0.12);
@@ -868,6 +981,10 @@ input[type="text"]:focus {
 
   .uncertainty-figure {
     min-height: 360px;
+  }
+
+  .workflow-stage-glossary {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1092,8 +1209,8 @@ input[type="text"]:focus {
    Token Confidence Chips
    ============================================================ */
 .token-chip {
-  border-radius: 4px;
-  padding: 2px 0;
+  border-radius: 6px;
+  padding: 0.12rem 0.18rem;
   transition: background 160ms ease, color 160ms ease;
 }
 
@@ -1184,7 +1301,9 @@ input[type="text"]:focus {
   border-bottom-color: var(--accent);
 }
 
-.markdown-output code {
+.markdown-output code,
+.field-note code,
+.legend code {
   padding: 0.15em 0.4em;
   border-radius: 4px;
   background: var(--bg-muted);

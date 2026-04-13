@@ -25,6 +25,7 @@ if load_dotenv is not None:
 
 APP_TITLE = "Doctor Language Bridge"
 MODEL_NAME = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
+TOKEN_ANALYTICS_MODEL = os.getenv("DOCTOR_WEB_TOKEN_ANALYTICS_MODEL", MODEL_NAME)
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 SITE_URL = os.getenv("OPENROUTER_SITE_URL", "http://127.0.0.1:8000")
 SITE_NAME = os.getenv("OPENROUTER_SITE_NAME", APP_TITLE)
@@ -42,6 +43,14 @@ LOGIC_BREAK_ABS_LOGPROB_THRESHOLD = float(
 MUTATION_THRESHOLD = float(os.getenv("DOCTOR_WEB_MUTATION_THRESHOLD", "2.0"))
 MUTATION_HIGH_THRESHOLD = float(os.getenv("DOCTOR_WEB_MUTATION_HIGH_THRESHOLD", "3.0"))
 USER_API_KEY_HEADER = "x-openrouter-api-key"
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,120}$")
+MODEL_SUGGESTIONS = [
+    item.strip()
+    for item in os.getenv("DOCTOR_WEB_MODEL_SUGGESTIONS", "").split(",")
+    if item.strip()
+]
+if MODEL_NAME not in MODEL_SUGGESTIONS:
+    MODEL_SUGGESTIONS.insert(0, MODEL_NAME)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STAGE_LABELS = {
@@ -101,6 +110,23 @@ class UploadedImage(BaseModel):
 class ConsultationRequest(BaseModel):
     text: str
     images: list[UploadedImage] = Field(default_factory=list)
+    model: str | None = None
+
+
+def resolve_requested_model(model_name: str | None) -> str:
+    cleaned = (model_name or "").strip()
+    if not cleaned:
+        return MODEL_NAME
+    if not MODEL_ID_RE.fullmatch(cleaned):
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a valid OpenRouter model ID, for example openai/gpt-4o.",
+        )
+    return cleaned
+
+
+def supports_token_analytics(model_name: str) -> bool:
+    return model_name.strip() == TOKEN_ANALYTICS_MODEL
 
 
 def is_usable_api_key(value: str) -> bool:
@@ -366,12 +392,132 @@ def detect_mutations(tokens_info: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def summarize_token_slice(tokens_slice: list[dict[str, Any]]) -> dict[str, Any]:
+    valid_probs = [token["prob"] for token in tokens_slice if token.get("prob") is not None]
+    avg_prob = sum(valid_probs) / len(valid_probs) if valid_probs else None
+    min_prob = min(valid_probs) if valid_probs else None
+    low_confidence_count = sum(1 for value in valid_probs if value < 0.5)
+    return {
+        "token_count": len(tokens_slice),
+        "avg_prob": avg_prob,
+        "avg_prob_percent": f"{avg_prob * 100:.1f}%" if avg_prob is not None else "N/A",
+        "min_prob": min_prob,
+        "min_prob_percent": f"{min_prob * 100:.1f}%" if min_prob is not None else "N/A",
+        "low_confidence_count": low_confidence_count,
+        "low_confidence_ratio": (low_confidence_count / len(valid_probs)) if valid_probs else 0.0,
+    }
+
+
+def statement_confidence_label(summary: dict[str, Any]) -> tuple[str, str]:
+    avg_prob = summary.get("avg_prob")
+    min_prob = summary.get("min_prob")
+    low_ratio = summary.get("low_confidence_ratio") or 0.0
+    if avg_prob is None or min_prob is None:
+        return ("Not available", "Detailed confidence scoring is unavailable for this statement.")
+    if min_prob < 0.25 or low_ratio >= 0.25:
+        return ("Review carefully", "Some wording in this statement was notably uncertain and should be checked manually.")
+    if min_prob < 0.5 or avg_prob < 0.72 or low_ratio >= 0.1:
+        return ("Review", "Most of the statement is stable, but one part may need a closer check.")
+    return ("Stable", "This statement was comparatively stable in the model output.")
+
+
+def collect_tokens_for_span(
+    tokens_info: list[dict[str, Any]], token_spans: list[tuple[int, int]], start: int, end: int
+) -> list[dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    for token, (token_start, token_end) in zip(tokens_info, token_spans):
+        if token_end <= start:
+            continue
+        if token_start >= end:
+            break
+        if token_end > start and token_start < end:
+            collected.append(token)
+    return collected
+
+
+def build_display_token_groups(tokens_info: list[dict[str, Any]], raw_text: str) -> list[dict[str, Any]]:
+    token_spans: list[tuple[int, int]] = []
+    cursor = 0
+    for token in tokens_info:
+        token_text = str(token.get("token") or "")
+        start = cursor
+        cursor += len(token_text)
+        token_spans.append((start, cursor))
+
+    groups: list[dict[str, Any]] = []
+    for match in re.finditer(r"\S+\s*|\n", raw_text):
+        segment_text = match.group(0)
+        tokens_slice = collect_tokens_for_span(tokens_info, token_spans, match.start(), match.end())
+        summary = summarize_token_slice(tokens_slice)
+        groups.append(
+            {
+                "text": segment_text,
+                "prob": summary["avg_prob"],
+                "prob_percent": summary["avg_prob_percent"],
+                "min_prob": summary["min_prob"],
+                "min_prob_percent": summary["min_prob_percent"],
+                "token_count": summary["token_count"],
+            }
+        )
+    return groups
+
+
+def build_statement_groups(tokens_info: list[dict[str, Any]], raw_text: str) -> list[dict[str, Any]]:
+    token_spans: list[tuple[int, int]] = []
+    cursor = 0
+    for token in tokens_info:
+        token_text = str(token.get("token") or "")
+        start = cursor
+        cursor += len(token_text)
+        token_spans.append((start, cursor))
+
+    groups: list[dict[str, Any]] = []
+    line_cursor = 0
+    for raw_line in raw_text.splitlines(keepends=True):
+        line_text = raw_line.rstrip("\n")
+        line_start = line_cursor
+        line_cursor += len(raw_line)
+        if not line_text.strip():
+            continue
+        stripped_line = line_text.strip()
+        if re.fullmatch(r"(?:#{1,6}\s+)?(?:\d+\.\s+)?[A-Za-z][A-Za-z /-]{0,40}", stripped_line):
+            continue
+
+        for match in re.finditer(r"[^.!?]+(?:[.!?]+|$)", line_text):
+            statement_text = match.group(0).strip()
+            if len(re.sub(r"[^A-Za-z0-9]+", "", statement_text)) < 5:
+                continue
+            start = line_start + match.start()
+            end = line_start + match.end()
+            tokens_slice = collect_tokens_for_span(tokens_info, token_spans, start, end)
+            if not tokens_slice:
+                continue
+            summary = summarize_token_slice(tokens_slice)
+            label, note = statement_confidence_label(summary)
+            groups.append(
+                {
+                    "text": statement_text,
+                    "label": label,
+                    "note": note,
+                    "avg_prob": summary["avg_prob"],
+                    "avg_prob_percent": summary["avg_prob_percent"],
+                    "min_prob": summary["min_prob"],
+                    "min_prob_percent": summary["min_prob_percent"],
+                    "token_count": summary["token_count"],
+                    "low_confidence_count": summary["low_confidence_count"],
+                }
+            )
+    return groups[:12]
+
+
 def analyze_logprobs(logprobs_data: Any, fallback_text: str) -> dict[str, Any]:
     cleaned_fallback_text = repair_escaped_bytes(fallback_text)
     if logprobs_data is None or getattr(logprobs_data, "content", None) is None:
         return {
             "available": False,
             "tokens_detail": [],
+            "display_tokens": [],
+            "statement_groups": [],
             "summary": {
                 "total_tokens": 0,
                 "avg_logprob": None,
@@ -448,10 +594,15 @@ def analyze_logprobs(logprobs_data: Any, fallback_text: str) -> dict[str, Any]:
     raw_joined_text = "".join(token["token"] for token in tokens_info)
     repaired_joined_text = repair_escaped_bytes(raw_joined_text)
     token_text_suspicious = has_escaped_bytes(raw_joined_text)
+    readable_text = cleaned_fallback_text.strip() or repaired_joined_text.strip()
+    display_tokens = [] if token_text_suspicious else build_display_token_groups(tokens_info, raw_joined_text)
+    statement_groups = [] if token_text_suspicious else build_statement_groups(tokens_info, raw_joined_text)
 
     return {
         "available": True,
         "tokens_detail": tokens_info,
+        "display_tokens": display_tokens,
+        "statement_groups": statement_groups,
         "summary": {
             "total_tokens": total_tokens,
             "avg_logprob": avg_logprob,
@@ -468,7 +619,7 @@ def analyze_logprobs(logprobs_data: Any, fallback_text: str) -> dict[str, Any]:
         "bucket_summary": bucket_summary,
         "logic_breaks": logic_breaks,
         "mutation_summary": mutation_summary,
-        "text": cleaned_fallback_text.strip() or repaired_joined_text.strip(),
+        "text": readable_text,
         "token_text_suspicious": token_text_suspicious,
     }
 
@@ -477,25 +628,30 @@ def generate_with_logprobs(
     client: OpenAI,
     messages: list[dict[str, Any]],
     *,
+    model_name: str,
+    enable_token_analytics: bool,
     temperature: float,
     max_tokens: int,
 ) -> dict[str, Any]:
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        timeout=REQUEST_TIMEOUT,
-        logprobs=True,
-        top_logprobs=TOP_LOGPROBS,
-        messages=messages,
-    )
+    request_args: dict[str, Any] = {
+        "model": model_name,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "timeout": REQUEST_TIMEOUT,
+        "messages": messages,
+    }
+    if enable_token_analytics:
+        request_args["logprobs"] = True
+        request_args["top_logprobs"] = TOP_LOGPROBS
+    response = client.chat.completions.create(**request_args)
     message = response.choices[0].message
     text = repair_escaped_bytes(normalize_message_content(message.content).strip())
-    analysis = analyze_logprobs(response.choices[0].logprobs, text)
+    analysis = analyze_logprobs(getattr(response.choices[0], "logprobs", None), text)
     return {
         "text": text or analysis["text"].strip(),
         "analysis": analysis,
-        "model": getattr(response, "model", MODEL_NAME),
+        "model": getattr(response, "model", model_name),
+        "token_analytics_enabled": enable_token_analytics,
     }
 
 
@@ -633,9 +789,9 @@ def build_pipeline_analytics(stage_reports: list[dict[str, Any]]) -> dict[str, A
     }
 
 
-def detect_language(client: OpenAI, text: str) -> dict[str, Any]:
+def detect_language(client: OpenAI, text: str, model_name: str) -> dict[str, Any]:
     response = client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         temperature=0,
         max_tokens=180,
         timeout=REQUEST_TIMEOUT,
@@ -674,6 +830,8 @@ def answer_with_logprobs(
     client: OpenAI,
     english_question: str,
     images: list[UploadedImage],
+    model_name: str,
+    enable_token_analytics: bool,
 ) -> dict[str, Any]:
     return generate_with_logprobs(
         client,
@@ -684,12 +842,16 @@ def answer_with_logprobs(
                 "content": build_multimodal_user_content(english_question, images),
             },
         ],
+        model_name=model_name,
+        enable_token_analytics=enable_token_analytics,
         temperature=0.2,
         max_tokens=1200,
     )
 
 
-def translation_with_logprobs(client: OpenAI, text: str, prompt: str) -> dict[str, Any]:
+def translation_with_logprobs(
+    client: OpenAI, text: str, prompt: str, *, model_name: str, enable_token_analytics: bool
+) -> dict[str, Any]:
     return generate_with_logprobs(
         client,
         messages=[
@@ -699,6 +861,8 @@ def translation_with_logprobs(client: OpenAI, text: str, prompt: str) -> dict[st
             },
             {"role": "user", "content": prompt.format(text=text)},
         ],
+        model_name=model_name,
+        enable_token_analytics=enable_token_analytics,
         temperature=0.1,
         max_tokens=1000,
     )
@@ -759,6 +923,9 @@ async def meta() -> JSONResponse:
         {
             "app_name": APP_TITLE,
             "model": MODEL_NAME,
+            "default_model": MODEL_NAME,
+            "token_analytics_model": TOKEN_ANALYTICS_MODEL,
+            "model_suggestions": MODEL_SUGGESTIONS,
             "requires_user_api_key": True,
             "api_key_header": USER_API_KEY_HEADER,
             "openrouter_portal_url": OPENROUTER_PORTAL_URL,
@@ -778,6 +945,8 @@ async def health() -> JSONResponse:
 async def consult_stream(request: Request, payload: ConsultationRequest) -> StreamingResponse:
     validate_payload(payload)
     api_key = extract_api_key_from_request(request)
+    model_name = resolve_requested_model(payload.model)
+    token_analytics_enabled = supports_token_analytics(model_name)
     client = get_client(api_key)
 
     def event_stream() -> Iterator[str]:
@@ -789,11 +958,15 @@ async def consult_stream(request: Request, payload: ConsultationRequest) -> Stre
                 {
                     "type": "status",
                     "stage": "detect_language",
-                    "message": "Checking whether the input is English.",
+                    "message": (
+                        f"Checking whether the input is English with {model_name}."
+                        if model_name
+                        else "Checking whether the input is English."
+                    ),
                 }
             )
 
-            detection = detect_language(client, source_text)
+            detection = detect_language(client, source_text, model_name)
             yield json_line({"type": "detection", **detection})
 
             source_language = detection["language_name"] or "English"
@@ -814,11 +987,17 @@ async def consult_stream(request: Request, payload: ConsultationRequest) -> Stre
                     {
                         "type": "status",
                         "stage": "translate_input",
-                        "message": f"Translating the {source_language} question into English.",
+                        "message": f"Translating the {source_language} question into English with {model_name}.",
                     }
                 )
                 prompt = build_translation_prompt(source_language)
-                translated = translation_with_logprobs(client, source_text, prompt)
+                translated = translation_with_logprobs(
+                    client,
+                    source_text,
+                    prompt,
+                    model_name=model_name,
+                    enable_token_analytics=token_analytics_enabled,
+                )
                 translated_analysis = translated["analysis"]
                 english_question = ensure_non_empty_result(translated["text"], "Input translation")
                 if translated_analysis.get("tokens_detail") and not translated_analysis.get("token_text_suspicious"):
@@ -850,14 +1029,20 @@ async def consult_stream(request: Request, payload: ConsultationRequest) -> Stre
                     "type": "status",
                     "stage": "answer_in_english",
                     "message": (
-                        f"Generating the English answer with {len(payload.images)} attached images."
+                        f"Generating the English answer with {model_name} and {len(payload.images)} attached images."
                         if payload.images
-                        else "Generating the English answer."
+                        else f"Generating the English answer with {model_name}."
                     ),
                 }
             )
 
-            answer = answer_with_logprobs(client, english_question, payload.images)
+            answer = answer_with_logprobs(
+                client,
+                english_question,
+                payload.images,
+                model_name=model_name,
+                enable_token_analytics=token_analytics_enabled,
+            )
             english_answer = answer["text"]
             logprob_data = answer["analysis"]
 
@@ -865,9 +1050,14 @@ async def consult_stream(request: Request, payload: ConsultationRequest) -> Stre
                 {
                     "type": "answer_ready",
                     "stage": "answer_in_english",
-                    "message": "The model response is ready. Streaming the English answer and token-level logprobs.",
+                    "message": (
+                        "The model response is ready. Streaming the English answer and detailed confidence data."
+                        if token_analytics_enabled
+                        else "The model response is ready. Streaming the English answer."
+                    ),
                     "model": answer["model"],
                     "logprobs_available": logprob_data["available"],
+                    "token_analytics_enabled": token_analytics_enabled,
                 }
             )
 
@@ -927,11 +1117,17 @@ async def consult_stream(request: Request, payload: ConsultationRequest) -> Stre
                     {
                         "type": "status",
                         "stage": "translate_answer_back",
-                        "message": f"Translating the English answer back into {source_language}.",
+                        "message": f"Translating the English answer back into {source_language} with {model_name}.",
                     }
                 )
                 prompt = build_back_translation_prompt(source_language)
-                translated_back_result = translation_with_logprobs(client, english_answer, prompt)
+                translated_back_result = translation_with_logprobs(
+                    client,
+                    english_answer,
+                    prompt,
+                    model_name=model_name,
+                    enable_token_analytics=token_analytics_enabled,
+                )
                 translated_back_analysis = translated_back_result["analysis"]
                 translated_back = ensure_non_empty_result(translated_back_result["text"], "Back-translation")
                 if translated_back_analysis.get("tokens_detail") and not translated_back_analysis.get("token_text_suspicious"):

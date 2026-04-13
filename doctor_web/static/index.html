@@ -88,6 +88,28 @@
           </label>
 
           <label class="field">
+            <div class="field-head">
+              <span>Model</span>
+              <span class="pill subtle" id="modelStatus">GPT-4o detailed confidence</span>
+            </div>
+            <input
+              id="modelInput"
+              type="text"
+              inputmode="text"
+              spellcheck="false"
+              autocapitalize="off"
+              autocomplete="off"
+              list="modelSuggestions"
+              placeholder="openai/gpt-4o"
+            />
+            <datalist id="modelSuggestions"></datalist>
+            <p class="field-note" id="modelNote">
+              Default: <code>openai/gpt-4o</code>. Detailed token-level confidence in this interface is currently
+              available only when this model is selected.
+            </p>
+          </label>
+
+          <label class="field">
             <span>Clinical question</span>
             <textarea
               id="questionInput"
@@ -180,6 +202,18 @@
               <div class="result-copy live-output markdown-output" id="englishAnswer"></div>
             </article>
 
+            <article class="result-card result-card-feature statement-review-card">
+              <div class="result-head">
+                <h3>Clinical statement confidence</h3>
+                <span class="pill subtle" id="statementConfidenceState">Waiting for answer</span>
+              </div>
+              <p class="result-copy" id="statementConfidenceSummary">
+                This review groups the English answer into full clinical statements so you can quickly see which parts
+                look stable and which parts deserve manual review.
+              </p>
+              <div class="statement-list" id="statementConfidenceList"></div>
+            </article>
+
             <article class="result-card result-card-editorial secondary-answer">
               <div class="result-head">
                 <h3>Answer in the original language</h3>
@@ -195,17 +229,32 @@
           <div class="panel-head">
             <div>
               <p class="panel-kicker">Confidence</p>
-              <h2>Token Uncertainty Curve</h2>
+              <h2>Workflow uncertainty by stage</h2>
               <p class="panel-intro">
-                This chart shows where token confidence drops across the workflow. Higher curves indicate lower certainty at those positions.
+                Each colored line runs from the start to the end of one workflow stage. The horizontal axis shows
+                relative progress within that stage, not clinical time or anatomy.
               </p>
             </div>
             <span class="pill subtle" id="perplexityState">Waiting for data</span>
           </div>
           <div class="uncertainty-figure" id="perplexityFigure"></div>
           <p class="result-copy" id="perplexitySummary">
-            This chart shows where token uncertainty begins to rise within each stage.
+            This chart compares where uncertainty rises within each stage of the language workflow.
           </p>
+          <div class="workflow-stage-glossary">
+            <article class="stage-note">
+              <h3>Input translation</h3>
+              <p>Turns the original non-English case question into medical English for reasoning. If the question is already in English, this stage is skipped.</p>
+            </article>
+            <article class="stage-note">
+              <h3>English answer</h3>
+              <p>This is the actual reasoning step, where the model answers from the English question and any attached images.</p>
+            </article>
+            <article class="stage-note">
+              <h3>Back-translation</h3>
+              <p>Translates the English answer back into the original language for readability. It does not add new clinical reasoning.</p>
+            </article>
+          </div>
         </section>
 
         <details class="panel advanced-review" id="advancedReview">
@@ -224,8 +273,8 @@
               <div class="panel-head">
                 <div>
                   <p class="panel-kicker">Confidence</p>
-                  <h2>Token review</h2>
-                  <p class="panel-intro">Use this section when you want a closer look at token-level confidence and uncertainty.</p>
+                  <h2>Token detail</h2>
+                  <p class="panel-intro">Open this section when you need word-level confidence detail after reviewing the full statement-level summary.</p>
                 </div>
                 <span class="pill subtle" id="logprobState">Waiting for answer</span>
               </div>
@@ -253,8 +302,8 @@
 
               <article class="result-card result-card-editorial">
                 <div class="result-head">
-                  <h3>Token confidence heatmap</h3>
-                  <span class="legend">Darker red tokens are less certain; hover to inspect alternatives.</span>
+                  <h3>Word-level confidence detail</h3>
+                  <span class="legend" id="tokenLegend">Displayed as word-like chunks for readability. Detailed token-level confidence is currently available only when <code>openai/gpt-4o</code> is selected.</span>
                 </div>
                 <div class="token-stream" id="tokenStream"></div>
               </article>
@@ -265,7 +314,7 @@
                 <div>
                   <p class="panel-kicker">Workflow confidence</p>
                   <h2>Workflow review</h2>
-                  <p class="panel-intro">These charts help you review confidence trends across translation, answer generation, and answer return.</p>
+                  <p class="panel-intro">These charts help you review how confidence changes across translation, answer generation, and answer return.</p>
                 </div>
                 <span class="pill subtle" id="pipelineAnalyticsState">Waiting for completion</span>
               </div>
@@ -273,7 +322,7 @@
               <article class="result-card result-card-hero workflow-chart">
                 <div class="result-head">
                   <h3>Workflow confidence overview</h3>
-                  <span class="legend">Top: the confidence trend across the full run. Bottom: stage heatmaps with highlighted drop points.</span>
+                  <span class="legend">Top: confidence trend across each stage. Bottom: stage heatmaps with highlighted drop points.</span>
                 </div>
                 <div class="figure-frame" id="pipelineFigure">
                   <p class="empty-state">After submission, this area will show a staged confidence overview for the full run.</p>

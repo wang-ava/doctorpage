@@ -1,6 +1,10 @@
 const questionInput = document.getElementById("questionInput");
 const apiKeyInput = document.getElementById("apiKeyInput");
 const apiKeyStatus = document.getElementById("apiKeyStatus");
+const modelInput = document.getElementById("modelInput");
+const modelStatus = document.getElementById("modelStatus");
+const modelNote = document.getElementById("modelNote");
+const modelSuggestions = document.getElementById("modelSuggestions");
 const imageInput = document.getElementById("imageInput");
 const imagePickerButton = document.getElementById("imagePickerButton");
 const imagePickerStatus = document.getElementById("imagePickerStatus");
@@ -21,12 +25,16 @@ const translatedAnswer = document.getElementById("translatedAnswer");
 
 const answerState = document.getElementById("answerState");
 const englishAnswer = document.getElementById("englishAnswer");
+const statementConfidenceState = document.getElementById("statementConfidenceState");
+const statementConfidenceSummary = document.getElementById("statementConfidenceSummary");
+const statementConfidenceList = document.getElementById("statementConfidenceList");
 const logprobState = document.getElementById("logprobState");
 const metricAvgProb = document.getElementById("metricAvgProb");
 const metricPerplexity = document.getElementById("metricPerplexity");
 const metricLowConfidence = document.getElementById("metricLowConfidence");
 const metricTotalTokens = document.getElementById("metricTotalTokens");
 const tokenStream = document.getElementById("tokenStream");
+const tokenLegend = document.getElementById("tokenLegend");
 const pipelineAnalyticsState = document.getElementById("pipelineAnalyticsState");
 const pipelineFigure = document.getElementById("pipelineFigure");
 const perplexityState = document.getElementById("perplexityState");
@@ -56,6 +64,10 @@ let translatedAnswerBuffer = "";
 let isSubmitting = false;
 let requiresUserApiKey = true;
 const apiKeyStorageKey = "doctorWebSavedOpenRouterApiKey";
+const modelStorageKey = "doctorWebSelectedModel";
+let defaultModelName = "openai/gpt-4o";
+let tokenAnalyticsModel = "openai/gpt-4o";
+let currentRunModel = "openai/gpt-4o";
 
 const placeholderApiKeys = new Set([
   "your-api-key-here",
@@ -74,6 +86,13 @@ if (apiKeyInput) {
   });
 }
 
+if (modelInput) {
+  modelInput.addEventListener("input", () => {
+    persistModelValue();
+    syncModelState();
+  });
+}
+
 imageInput.addEventListener("change", async (event) => {
   const files = Array.from(event.target.files || []);
   selectedImages = await Promise.all(files.map(fileToPayload));
@@ -87,8 +106,10 @@ boot();
 
 async function boot() {
   restorePersistedApiKey();
+  restorePersistedModel();
   await refreshQuotaState();
   syncApiKeyState();
+  syncModelState();
   hideResultsShell();
   renderIdleProcessingLog();
 }
@@ -123,15 +144,84 @@ function persistApiKeyValue() {
   }
 }
 
+function restorePersistedModel() {
+  if (!modelInput) {
+    return;
+  }
+  try {
+    const savedValue = localStorage.getItem(modelStorageKey);
+    if (savedValue) {
+      modelInput.value = savedValue;
+    }
+  } catch (error) {
+    // Ignore storage failures and continue without persistence.
+  }
+}
+
+function persistModelValue() {
+  if (!modelInput) {
+    return;
+  }
+  try {
+    const value = modelInput.value.trim();
+    if (!value) {
+      localStorage.removeItem(modelStorageKey);
+      return;
+    }
+    localStorage.setItem(modelStorageKey, value);
+  } catch (error) {
+    // Ignore storage failures and continue normally.
+  }
+}
+
+function getSelectedModelValue() {
+  return modelInput?.value.trim() || defaultModelName;
+}
+
+function populateModelSuggestions(models = []) {
+  if (!modelSuggestions) {
+    return;
+  }
+  const values = Array.from(new Set([defaultModelName, ...(models || [])].filter(Boolean)));
+  modelSuggestions.replaceChildren(
+    ...values.map((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      return option;
+    })
+  );
+}
+
+function syncModelState() {
+  const selectedModel = getSelectedModelValue();
+  const detailedConfidenceAvailable = selectedModel === tokenAnalyticsModel;
+  if (modelStatus) {
+    modelStatus.textContent = detailedConfidenceAvailable ? "Detailed confidence available" : "Answer generation only";
+  }
+  if (modelNote) {
+    modelNote.innerHTML = detailedConfidenceAvailable
+      ? `Using <code>${escapeHtml(selectedModel)}</code>. This selection supports the detailed statement and token-level confidence review shown below.`
+      : `Using <code>${escapeHtml(selectedModel)}</code>. You can still generate the answer with this model, but detailed confidence review in this interface is currently available only when <code>${escapeHtml(tokenAnalyticsModel)}</code> is selected.`;
+  }
+}
+
 async function refreshQuotaState() {
   try {
     const response = await fetch("/api/meta");
     const meta = await response.json();
     requiresUserApiKey = meta.requires_user_api_key !== false;
+    defaultModelName = meta.default_model || meta.model || defaultModelName;
+    tokenAnalyticsModel = meta.token_analytics_model || defaultModelName;
     if (questionInput) {
       questionInput.maxLength = meta.max_input_chars;
     }
+    if (modelInput && !modelInput.value.trim()) {
+      modelInput.value = defaultModelName;
+    }
+    populateModelSuggestions(meta.model_suggestions || []);
+    currentRunModel = getSelectedModelValue();
     syncApiKeyState();
+    syncModelState();
   } catch (error) {
     // The page can still work without meta preloading.
   }
@@ -140,6 +230,7 @@ async function refreshQuotaState() {
 async function runConsultation() {
   const text = questionInput.value.trim();
   const apiKey = getApiKeyValue();
+  const selectedModel = getSelectedModelValue();
   if (requiresUserApiKey && !isUsableApiKey(apiKey)) {
     pushActivity(
       "API key required",
@@ -158,8 +249,9 @@ async function runConsultation() {
   revealResultsShell();
   resetOutputs();
   setBusy(true);
+  currentRunModel = selectedModel;
   pipelineBadge.textContent = "Running";
-  pushActivity("Request started", "The case has been submitted and processing has started.");
+  pushActivity("Request started", `The case has been submitted and processing has started with ${selectedModel}.`);
 
   try {
     let streamHadError = false;
@@ -169,7 +261,7 @@ async function runConsultation() {
         "Content-Type": "application/json",
         "X-OpenRouter-API-Key": apiKey,
       },
-      body: JSON.stringify({ text, images: selectedImages }),
+      body: JSON.stringify({ text, images: selectedImages, model: selectedModel }),
     });
 
     if (!response.ok) {
@@ -262,15 +354,17 @@ function handleEvent(event) {
       break;
     case "answer_ready":
       markStepActive("answer_in_english");
+      currentRunModel = event.model || currentRunModel;
       answerState.textContent = "Streaming";
-      logprobState.textContent = event.logprobs_available ? "Token confidence available" : "Token confidence unavailable";
+      logprobState.textContent = event.logprobs_available
+        ? "Detailed confidence available"
+        : "Detailed confidence unavailable";
       pushActivity("English answer", event.message);
       break;
     case "answer_token":
       answerState.textContent = "Streaming";
       englishAnswerBuffer += event.token;
       renderMarkdownBlock(englishAnswer, englishAnswerBuffer);
-      tokenStream.appendChild(buildTokenNode(event));
       break;
     case "answer_complete":
       markStepDone("answer_in_english");
@@ -278,6 +372,8 @@ function handleEvent(event) {
       englishAnswerBuffer = event.text;
       renderMarkdownBlock(englishAnswer, englishAnswerBuffer);
       renderMetrics(event.metrics);
+      renderStatementConfidence(event.analysis?.statement_groups || [], event.analysis?.available, currentRunModel);
+      renderTokenDetail(event.analysis?.display_tokens || [], event.analysis?.available, currentRunModel);
       break;
     case "back_translation_skipped":
       markStepDone("translate_answer_back");
@@ -302,7 +398,12 @@ function handleEvent(event) {
       if (event.analytics?.available) {
         pipelineAnalyticsState.textContent = event.final ? "Analysis complete" : "Intermediate results available";
       } else {
-        pipelineAnalyticsState.textContent = event.final ? "Confidence data unavailable" : "Waiting for confidence data";
+        pipelineAnalyticsState.textContent =
+          currentRunModel === tokenAnalyticsModel
+            ? event.final
+              ? "Confidence data unavailable"
+              : "Waiting for confidence data"
+            : `Detailed confidence available with ${tokenAnalyticsModel}`;
       }
       renderPipelineAnalytics(event.analytics || {});
       break;
@@ -313,7 +414,6 @@ function handleEvent(event) {
       break;
     case "done":
       pushActivity("Completed", "Processing is complete.");
-      if (advancedReview) advancedReview.open = true;
       break;
     default:
       break;
@@ -323,7 +423,7 @@ function handleEvent(event) {
 function buildTokenNode(event) {
   const token = document.createElement("span");
   token.className = `token-chip ${tokenClass(event.prob)}`;
-  token.textContent = event.token;
+  token.textContent = event.text;
   token.title = tokenTitle(event);
   return token;
 }
@@ -343,16 +443,10 @@ function tokenClass(probability) {
 
 function tokenTitle(event) {
   const lines = [];
-  lines.push(`Token: ${JSON.stringify(event.token)}`);
-  lines.push(`Confidence score: ${event.logprob ?? "N/A"}`);
+  lines.push(`Text: ${JSON.stringify(event.text)}`);
   lines.push(`Probability: ${event.prob_percent || "N/A"}`);
-  if (Array.isArray(event.top_alternatives) && event.top_alternatives.length) {
-    const alternatives = event.top_alternatives
-      .slice(0, 3)
-      .map((alt) => `${JSON.stringify(alt.token)} (${alt.prob_percent})`)
-      .join(", ");
-    lines.push(`Alternatives: ${alternatives}`);
-  }
+  lines.push(`Lowest token confidence: ${event.min_prob_percent || "N/A"}`);
+  lines.push(`Underlying tokens: ${event.token_count ?? "N/A"}`);
   return lines.join("\n");
 }
 
@@ -366,6 +460,79 @@ function renderMetrics(metrics = {}) {
       : "N/A";
   metricTotalTokens.textContent =
     typeof metrics.total_tokens === "number" ? String(metrics.total_tokens) : "N/A";
+}
+
+function renderStatementConfidence(groups = [], analysisAvailable, modelName) {
+  if (!statementConfidenceState || !statementConfidenceSummary || !statementConfidenceList) {
+    return;
+  }
+  statementConfidenceList.innerHTML = "";
+
+  if (!analysisAvailable) {
+    statementConfidenceState.textContent = "Unavailable";
+    statementConfidenceSummary.textContent =
+      `Detailed statement confidence is currently available only when ${tokenAnalyticsModel} is selected. The answer still ran with ${modelName || currentRunModel}.`;
+    statementConfidenceList.innerHTML = `<p class="empty-state">Choose ${escapeHtml(tokenAnalyticsModel)} if you want confidence scores for each full clinical statement.</p>`;
+    return;
+  }
+
+  if (!groups.length) {
+    statementConfidenceState.textContent = "Limited";
+    statementConfidenceSummary.textContent =
+      "The answer is available, but there was not enough scored text to build the statement-level review.";
+    statementConfidenceList.innerHTML = '<p class="empty-state">No statement-level confidence blocks are available for this response.</p>';
+    return;
+  }
+
+  statementConfidenceState.textContent = "Ready";
+  statementConfidenceSummary.textContent =
+    "Each row below is a full statement from the English answer. Use it to spot which parts of the recommendation deserve manual review first.";
+
+  for (const group of groups) {
+    const item = document.createElement("article");
+    const state =
+      group.label === "Stable" ? "stable" : group.label === "Review carefully" ? "careful" : "review";
+    item.className = "statement-item";
+    item.dataset.state = state;
+    item.innerHTML = `
+      <div class="statement-head">
+        <span class="statement-label">${escapeHtml(group.label || "Review")}</span>
+        <span class="statement-metrics">Average ${escapeHtml(group.avg_prob_percent || "N/A")} · Lowest phrase ${escapeHtml(group.min_prob_percent || "N/A")}</span>
+      </div>
+      <p class="statement-text">${escapeHtml(group.text || "")}</p>
+      <p class="statement-note">${escapeHtml(group.note || "")}</p>
+    `;
+    statementConfidenceList.appendChild(item);
+  }
+}
+
+function renderTokenDetail(groups = [], analysisAvailable, modelName) {
+  if (!tokenStream || !tokenLegend) {
+    return;
+  }
+  tokenStream.innerHTML = "";
+
+  if (!analysisAvailable) {
+    tokenLegend.innerHTML =
+      `Detailed token-level confidence is currently available only when <code>${escapeHtml(tokenAnalyticsModel)}</code> is selected.`;
+    tokenStream.innerHTML = `<p class="empty-state">The answer ran with ${escapeHtml(modelName || currentRunModel)}, so word-level confidence detail is not shown for this run.</p>`;
+    return;
+  }
+
+  tokenLegend.innerHTML =
+    "Displayed as word-like chunks for readability. Colors still come from the underlying model tokens, so use this as a fine-detail view rather than the main clinical review.";
+  if (!groups.length) {
+    tokenStream.innerHTML = '<p class="empty-state">Word-level confidence detail is not available for this response.</p>';
+    return;
+  }
+
+  for (const group of groups) {
+    if (group.text === "\n") {
+      tokenStream.appendChild(document.createTextNode("\n"));
+      continue;
+    }
+    tokenStream.appendChild(buildTokenNode(group));
+  }
 }
 
 function getApiKeyValue() {
@@ -515,7 +682,7 @@ function renderPipelineFigure(analytics) {
       <svg class="chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Full pipeline confidence figure">
         <rect x="0" y="0" width="${width}" height="${height}" rx="24" fill="#f7fbf9" stroke="#dbe6e2"></rect>
         <text class="chart-label" x="${left}" y="54">Workflow confidence trend</text>
-        <text class="chart-note" x="${left}" y="${lineBottom + 26}">Top: average token confidence by position. Bottom: stage heatmaps. Amber markers flag notable confidence drops.</text>
+        <text class="chart-note" x="${left}" y="${lineBottom + 26}">Top: confidence trend as each stage progresses. Bottom: stage heatmaps. Amber markers flag notable drops that may deserve manual review.</text>
         ${stageBands.join("")}
         ${guideLines.join("")}
         <line x1="${left}" y1="${lineBottom}" x2="${width - right}" y2="${lineBottom}" stroke="rgba(22,47,39,0.18)" />
@@ -614,20 +781,23 @@ function renderPerplexityFigure(analytics) {
       <line x1="${left}" y1="${top}" x2="${left}" y2="${top + usableHeight}" stroke="var(--border)" />
       <text class="chart-note" x="${left - 12}" y="${top + 6}" text-anchor="end">${formatFloat(maxPerplexity, 1)}</text>
       <text class="chart-note" x="${left - 12}" y="${top + usableHeight + 6}" text-anchor="end">1.0</text>
-      <text class="chart-label" x="${left}" y="${top - 26}">Token uncertainty by position</text>
-      <text class="chart-note" x="${left}" y="${top - 6}">Higher curves indicate lower certainty at those positions within each workflow stage.</text>
+      <text class="chart-label" x="${left}" y="${top - 26}">Token uncertainty within each stage</text>
+      <text class="chart-note" x="${left}" y="${top - 6}">Each colored line runs from the start to the end of one stage. Higher curves indicate lower certainty.</text>
       ${areaSvg}
       ${seriesSvg}
       ${dotSvg}
       ${legendSvg}
+      <text class="chart-note" x="${left}" y="${height - 54}">Start of that stage</text>
+      <text class="chart-note" x="${(left + (width - right)) / 2}" y="${height - 54}" text-anchor="middle">Relative progress within the stage</text>
+      <text class="chart-note" x="${width - right}" y="${height - 54}" text-anchor="end">End of that stage</text>
     </svg>
   `;
   if (perplexityState) perplexityState.textContent = "Completed";
   const overallPerplexity = analytics.overall_summary?.overall_perplexity;
   perplexitySummary.textContent =
     typeof overallPerplexity === "number"
-      ? `The overall uncertainty score for this workflow is about ${overallPerplexity.toFixed(3)}. Higher curves indicate lower token confidence at those positions.`
-      : "This chart shows where token uncertainty begins to rise within each stage.";
+      ? `The overall uncertainty score for this workflow is about ${overallPerplexity.toFixed(3)}. Read the horizontal axis as start-to-end progress within each stage, not as a clinical timeline.`
+      : "Read the horizontal axis as start-to-end progress within each stage, not as a clinical timeline.";
 }
 
 function renderLogicBreakPanel(analytics) {
@@ -697,6 +867,10 @@ function renderEmptyAnalytics() {
   logicBreakList.innerHTML = '<p class="empty-state">No confidence drop events are available yet.</p>';
   mutationFigure.innerHTML = '<p class="empty-state">No large confidence shifts are available yet.</p>';
   if (perplexityState) perplexityState.textContent = "No data";
+  if (perplexitySummary) {
+    perplexitySummary.textContent =
+      `Read the horizontal axis as start-to-end progress within each stage, not as a clinical timeline. Detailed charting is available when ${tokenAnalyticsModel} is selected.`;
+  }
   logicBreakState.textContent = "No data";
   mutationState.textContent = "No data";
   logicBreakCount.textContent = "-";
@@ -877,6 +1051,7 @@ function resetOutputs() {
   translatedQuestionBuffer = "";
   translatedAnswerBuffer = "";
   englishAnswerBuffer = "";
+  currentRunModel = getSelectedModelValue();
   renderMarkdownBlock(translatedQuestion, "");
   renderMarkdownBlock(translatedAnswer, "");
   renderMarkdownBlock(englishAnswer, "");
@@ -887,7 +1062,14 @@ function resetOutputs() {
   translationState.textContent = "Idle";
   backTranslationState.textContent = "Idle";
   answerState.textContent = "Idle";
+  statementConfidenceState.textContent = "Waiting for answer";
+  statementConfidenceSummary.textContent =
+    "This review groups the English answer into full clinical statements so you can quickly see which parts look stable and which parts deserve manual review.";
+  statementConfidenceList.innerHTML =
+    '<p class="empty-state">After the answer is ready, full clinical statements will be listed here with a simple review label.</p>';
   logprobState.textContent = "Waiting for answer";
+  tokenLegend.innerHTML =
+    `Displayed as word-like chunks for readability. Detailed token-level confidence is currently available only when <code>${escapeHtml(tokenAnalyticsModel)}</code> is selected.`;
   metricAvgProb.textContent = "-";
   metricPerplexity.textContent = "-";
   metricLowConfidence.textContent = "-";
