@@ -4,6 +4,9 @@ import json
 import math
 import os
 import re
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -27,6 +30,7 @@ APP_TITLE = "Doctor Language Bridge"
 MODEL_NAME = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
 TOKEN_ANALYTICS_MODEL = os.getenv("DOCTOR_WEB_TOKEN_ANALYTICS_MODEL", MODEL_NAME)
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_MODELS_URL = os.getenv("OPENROUTER_MODELS_URL", "https://openrouter.ai/api/v1/models")
 SITE_URL = os.getenv("OPENROUTER_SITE_URL", "http://127.0.0.1:8000")
 SITE_NAME = os.getenv("OPENROUTER_SITE_NAME", APP_TITLE)
 OPENROUTER_PORTAL_URL = os.getenv("OPENROUTER_PORTAL_URL", "https://openrouter.ai/")
@@ -34,6 +38,8 @@ MAX_INPUT_CHARS = int(os.getenv("DOCTOR_WEB_MAX_INPUT_CHARS", "12000"))
 MAX_IMAGE_COUNT = int(os.getenv("DOCTOR_WEB_MAX_IMAGE_COUNT", "4"))
 TOP_LOGPROBS = int(os.getenv("DOCTOR_WEB_TOP_LOGPROBS", "5"))
 REQUEST_TIMEOUT = float(os.getenv("DOCTOR_WEB_TIMEOUT", "240"))
+MODELS_REQUEST_TIMEOUT = float(os.getenv("DOCTOR_WEB_MODELS_TIMEOUT", "12"))
+MODELS_CACHE_SECONDS = int(os.getenv("DOCTOR_WEB_MODELS_CACHE_SECONDS", "3600"))
 PIPELINE_BIN_COUNT = int(os.getenv("DOCTOR_WEB_PIPELINE_BINS", "20"))
 LOGIC_BREAK_DROP_THRESHOLD = float(os.getenv("DOCTOR_WEB_LOGIC_BREAK_DROP_THRESHOLD", "1.5"))
 LOGIC_BREAK_Z_THRESHOLD = float(os.getenv("DOCTOR_WEB_LOGIC_BREAK_Z_THRESHOLD", "2.0"))
@@ -51,6 +57,7 @@ MODEL_SUGGESTIONS = [
 ]
 if MODEL_NAME not in MODEL_SUGGESTIONS:
     MODEL_SUGGESTIONS.insert(0, MODEL_NAME)
+MODELS_CACHE: dict[str, Any] = {"expires_at": 0.0, "models": []}
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STAGE_LABELS = {
@@ -127,6 +134,87 @@ def resolve_requested_model(model_name: str | None) -> str:
 
 def supports_token_analytics(model_name: str) -> bool:
     return model_name.strip() == TOKEN_ANALYTICS_MODEL
+
+
+def normalize_openrouter_model(raw_model: dict[str, Any]) -> dict[str, Any]:
+    model_id = str(raw_model.get("id") or "").strip()
+    model_name = str(raw_model.get("name") or model_id).strip()
+    provider = model_id.split("/", 1)[0] if "/" in model_id else ""
+    supported_parameters = raw_model.get("supported_parameters") or []
+    architecture = raw_model.get("architecture") or {}
+    pricing = raw_model.get("pricing") or {}
+    top_provider = raw_model.get("top_provider") or {}
+    return {
+        "id": model_id,
+        "name": model_name,
+        "provider": provider,
+        "description": str(raw_model.get("description") or "").strip(),
+        "context_length": raw_model.get("context_length"),
+        "input_modalities": architecture.get("input_modalities") or [],
+        "output_modalities": architecture.get("output_modalities") or [],
+        "supported_parameters": supported_parameters if isinstance(supported_parameters, list) else [],
+        "prompt_price": pricing.get("prompt"),
+        "completion_price": pricing.get("completion"),
+        "is_moderated": top_provider.get("is_moderated"),
+        "supports_token_analytics": model_id == TOKEN_ANALYTICS_MODEL,
+    }
+
+
+def fallback_models() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": model_id,
+            "name": model_id,
+            "provider": model_id.split("/", 1)[0] if "/" in model_id else "",
+            "description": "",
+            "context_length": None,
+            "input_modalities": [],
+            "output_modalities": [],
+            "supported_parameters": [],
+            "prompt_price": None,
+            "completion_price": None,
+            "is_moderated": None,
+            "supports_token_analytics": model_id == TOKEN_ANALYTICS_MODEL,
+        }
+        for model_id in MODEL_SUGGESTIONS
+    ]
+
+
+def fetch_openrouter_models(force_refresh: bool = False) -> list[dict[str, Any]]:
+    now = time.time()
+    cached_models = MODELS_CACHE.get("models") or []
+    if cached_models and not force_refresh and float(MODELS_CACHE.get("expires_at") or 0.0) > now:
+        return cached_models
+
+    url = f"{OPENROUTER_MODELS_URL}?output_modalities=text"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": f"{APP_TITLE}/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=MODELS_REQUEST_TIMEOUT) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return cached_models or fallback_models()
+
+    raw_models = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(raw_models, list):
+        return cached_models or fallback_models()
+
+    models = [
+        normalized
+        for raw_model in raw_models
+        if isinstance(raw_model, dict)
+        for normalized in [normalize_openrouter_model(raw_model)]
+        if normalized["id"]
+    ]
+    models.sort(key=lambda item: (item["id"] != MODEL_NAME, item["provider"], item["name"].lower()))
+    MODELS_CACHE["models"] = models
+    MODELS_CACHE["expires_at"] = now + MODELS_CACHE_SECONDS
+    return models
 
 
 def is_usable_api_key(value: str) -> bool:
@@ -919,19 +1007,51 @@ async def root() -> FileResponse:
 
 @app.get("/api/meta")
 async def meta() -> JSONResponse:
+    initial_models = fetch_openrouter_models()[:40]
     return JSONResponse(
         {
             "app_name": APP_TITLE,
             "model": MODEL_NAME,
             "default_model": MODEL_NAME,
             "token_analytics_model": TOKEN_ANALYTICS_MODEL,
-            "model_suggestions": MODEL_SUGGESTIONS,
+            "model_suggestions": [model["id"] for model in initial_models] or MODEL_SUGGESTIONS,
+            "models": initial_models,
             "requires_user_api_key": True,
             "api_key_header": USER_API_KEY_HEADER,
             "openrouter_portal_url": OPENROUTER_PORTAL_URL,
             "max_input_chars": MAX_INPUT_CHARS,
             "max_image_count": MAX_IMAGE_COUNT,
             "top_logprobs": TOP_LOGPROBS,
+        }
+    )
+
+
+@app.get("/api/models")
+async def models(q: str = "", refresh: bool = False) -> JSONResponse:
+    all_models = fetch_openrouter_models(force_refresh=refresh)
+    query = q.strip().lower()
+    if query:
+        terms = [term for term in re.split(r"\s+", query) if term]
+
+        def matches(model: dict[str, Any]) -> bool:
+            haystack = " ".join(
+                [
+                    str(model.get("id") or ""),
+                    str(model.get("name") or ""),
+                    str(model.get("provider") or ""),
+                    str(model.get("description") or ""),
+                ]
+            ).lower()
+            return all(term in haystack for term in terms)
+
+        all_models = [model for model in all_models if matches(model)]
+
+    return JSONResponse(
+        {
+            "models": all_models[:500],
+            "count": len(all_models),
+            "default_model": MODEL_NAME,
+            "token_analytics_model": TOKEN_ANALYTICS_MODEL,
         }
     )
 

@@ -5,6 +5,7 @@ const modelInput = document.getElementById("modelInput");
 const modelStatus = document.getElementById("modelStatus");
 const modelNote = document.getElementById("modelNote");
 const modelSuggestions = document.getElementById("modelSuggestions");
+const modelPicker = document.getElementById("modelPicker");
 const imageInput = document.getElementById("imageInput");
 const imagePickerButton = document.getElementById("imagePickerButton");
 const imagePickerStatus = document.getElementById("imagePickerStatus");
@@ -68,6 +69,8 @@ const modelStorageKey = "doctorWebSelectedModel";
 let defaultModelName = "openai/gpt-4o";
 let tokenAnalyticsModel = "openai/gpt-4o";
 let currentRunModel = "openai/gpt-4o";
+let openRouterModels = [];
+let modelSearchAbortController = null;
 
 const placeholderApiKeys = new Set([
   "your-api-key-here",
@@ -90,8 +93,28 @@ if (modelInput) {
   modelInput.addEventListener("input", () => {
     persistModelValue();
     syncModelState();
+    scheduleModelSearch();
+  });
+  modelInput.addEventListener("focus", () => {
+    renderModelPicker(filterModels(modelInput.value));
+    modelPicker?.classList.add("is-open");
+  });
+  modelInput.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      modelPicker?.classList.remove("is-open");
+    }
   });
 }
+
+document.addEventListener("click", (event) => {
+  if (!modelInput || !modelPicker) {
+    return;
+  }
+  if (event.target === modelInput || modelPicker.contains(event.target)) {
+    return;
+  }
+  modelPicker.classList.remove("is-open");
+});
 
 imageInput.addEventListener("change", async (event) => {
   const files = Array.from(event.target.files || []);
@@ -182,7 +205,13 @@ function populateModelSuggestions(models = []) {
   if (!modelSuggestions) {
     return;
   }
-  const values = Array.from(new Set([defaultModelName, ...(models || [])].filter(Boolean)));
+  const values = Array.from(
+    new Set(
+      [defaultModelName, ...(models || [])]
+        .map((model) => (typeof model === "string" ? model : model?.id))
+        .filter(Boolean)
+    )
+  );
   modelSuggestions.replaceChildren(
     ...values.map((value) => {
       const option = document.createElement("option");
@@ -190,6 +219,144 @@ function populateModelSuggestions(models = []) {
       return option;
     })
   );
+}
+
+function normalizeModelOption(model) {
+  if (typeof model === "string") {
+    return {
+      id: model,
+      name: model,
+      provider: model.split("/", 1)[0] || "",
+      description: "",
+      context_length: null,
+      input_modalities: [],
+      output_modalities: [],
+      supports_token_analytics: model === tokenAnalyticsModel,
+    };
+  }
+  return {
+    id: model?.id || "",
+    name: model?.name || model?.id || "",
+    provider: model?.provider || (model?.id?.split("/", 1)[0] || ""),
+    description: model?.description || "",
+    context_length: model?.context_length ?? null,
+    input_modalities: model?.input_modalities || [],
+    output_modalities: model?.output_modalities || [],
+    supports_token_analytics: Boolean(model?.supports_token_analytics || model?.id === tokenAnalyticsModel),
+  };
+}
+
+function setOpenRouterModels(models = []) {
+  const byId = new Map();
+  for (const model of [defaultModelName, ...(models || [])]) {
+    const normalized = normalizeModelOption(model);
+    if (normalized.id) {
+      byId.set(normalized.id, normalized);
+    }
+  }
+  openRouterModels = Array.from(byId.values());
+  populateModelSuggestions(openRouterModels);
+  renderModelPicker(filterModels(modelInput?.value || ""));
+}
+
+function filterModels(query) {
+  const terms = String(query || "")
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  const source = openRouterModels.length ? openRouterModels : [normalizeModelOption(defaultModelName)];
+  if (!terms.length) {
+    return source.slice(0, 18);
+  }
+  return source
+    .map((model) => {
+      const haystack = `${model.id} ${model.name} ${model.provider} ${model.description}`.toLowerCase();
+      const matched = terms.every((term) => haystack.includes(term));
+      const firstTerm = terms[0] || "";
+      const score =
+        (model.id.toLowerCase().startsWith(firstTerm) ? 0 : 2) +
+        (model.name.toLowerCase().startsWith(firstTerm) ? 0 : 1) +
+        (model.supports_token_analytics ? -1 : 0);
+      return { model, matched, score };
+    })
+    .filter((entry) => entry.matched)
+    .sort((a, b) => a.score - b.score || a.model.id.localeCompare(b.model.id))
+    .slice(0, 24)
+    .map((entry) => entry.model);
+}
+
+function renderModelPicker(models = []) {
+  if (!modelPicker) {
+    return;
+  }
+  modelPicker.innerHTML = "";
+  if (!models.length) {
+    const empty = document.createElement("div");
+    empty.className = "model-option model-option-empty";
+    empty.textContent = "No matching OpenRouter models found.";
+    modelPicker.appendChild(empty);
+    modelPicker.classList.add("is-open");
+    return;
+  }
+
+  for (const model of models) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "model-option";
+    button.setAttribute("role", "option");
+    const context = typeof model.context_length === "number" ? `${model.context_length.toLocaleString()} context` : "";
+    const modalities = [...(model.input_modalities || []), ...(model.output_modalities || [])]
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(" + ");
+    button.innerHTML = `
+      <span class="model-option-main">
+        <strong>${escapeHtml(model.name || model.id)}</strong>
+        <code>${escapeHtml(model.id)}</code>
+      </span>
+      <span class="model-option-meta">
+        ${model.supports_token_analytics ? "<mark>Detailed confidence</mark>" : ""}
+        ${context ? `<span>${escapeHtml(context)}</span>` : ""}
+        ${modalities ? `<span>${escapeHtml(modalities)}</span>` : ""}
+      </span>
+    `;
+    button.addEventListener("click", () => {
+      modelInput.value = model.id;
+      persistModelValue();
+      syncModelState();
+      modelPicker.classList.remove("is-open");
+    });
+    modelPicker.appendChild(button);
+  }
+  modelPicker.classList.add("is-open");
+}
+
+async function loadOpenRouterModels(query = "") {
+  if (modelSearchAbortController) {
+    modelSearchAbortController.abort();
+  }
+  modelSearchAbortController = new AbortController();
+  const url = query ? `/api/models?q=${encodeURIComponent(query)}` : "/api/models";
+  const response = await fetch(url, { signal: modelSearchAbortController.signal });
+  if (!response.ok) {
+    throw new Error("Unable to load OpenRouter models.");
+  }
+  const payload = await response.json();
+  setOpenRouterModels(payload.models || []);
+}
+
+function scheduleModelSearch() {
+  if (!modelInput) {
+    return;
+  }
+  renderModelPicker(filterModels(modelInput.value));
+  window.clearTimeout(scheduleModelSearch.timer);
+  scheduleModelSearch.timer = window.setTimeout(() => {
+    loadOpenRouterModels(modelInput.value.trim()).catch(() => {
+      // Keep local/cached options if the OpenRouter model list cannot be refreshed.
+    });
+  }, 180);
 }
 
 function syncModelState() {
@@ -218,10 +385,13 @@ async function refreshQuotaState() {
     if (modelInput && !modelInput.value.trim()) {
       modelInput.value = defaultModelName;
     }
-    populateModelSuggestions(meta.model_suggestions || []);
+    setOpenRouterModels(meta.models || meta.model_suggestions || []);
     currentRunModel = getSelectedModelValue();
     syncApiKeyState();
     syncModelState();
+    loadOpenRouterModels().catch(() => {
+      // The initial meta response already contains fallback model options.
+    });
   } catch (error) {
     // The page can still work without meta preloading.
   }
