@@ -70,6 +70,7 @@ let defaultModelName = "openai/gpt-4o";
 let tokenAnalyticsModel = "openai/gpt-4o";
 let currentRunModel = "openai/gpt-4o";
 let openRouterModels = [];
+let searchedOpenRouterModels = [];
 let modelSearchAbortController = null;
 
 const placeholderApiKeys = new Set([
@@ -248,7 +249,7 @@ function normalizeModelOption(model) {
 
 function setOpenRouterModels(models = []) {
   const byId = new Map();
-  for (const model of [defaultModelName, ...(models || [])]) {
+  for (const model of [defaultModelName, ...openRouterModels, ...(models || [])]) {
     const normalized = normalizeModelOption(model);
     if (normalized.id) {
       byId.set(normalized.id, normalized);
@@ -259,13 +260,23 @@ function setOpenRouterModels(models = []) {
   renderModelPicker(filterModels(modelInput?.value || ""));
 }
 
-function filterModels(query) {
+function setSearchedOpenRouterModels(models = [], query = "") {
+  searchedOpenRouterModels = (models || []).map(normalizeModelOption).filter((model) => model.id);
+  setOpenRouterModels(searchedOpenRouterModels);
+  renderModelPicker(filterModels(query, searchedOpenRouterModels));
+}
+
+function filterModels(query, preferredSource = null) {
   const terms = String(query || "")
     .trim()
     .toLowerCase()
     .split(/\s+/)
     .filter(Boolean);
-  const source = openRouterModels.length ? openRouterModels : [normalizeModelOption(defaultModelName)];
+  const source = preferredSource?.length
+    ? preferredSource
+    : openRouterModels.length
+      ? openRouterModels
+      : [normalizeModelOption(defaultModelName)];
   if (!terms.length) {
     return source.slice(0, 18);
   }
@@ -332,6 +343,18 @@ function renderModelPicker(models = []) {
   modelPicker.classList.add("is-open");
 }
 
+function renderModelPickerMessage(message) {
+  if (!modelPicker) {
+    return;
+  }
+  modelPicker.innerHTML = "";
+  const item = document.createElement("div");
+  item.className = "model-option model-option-empty";
+  item.textContent = message;
+  modelPicker.appendChild(item);
+  modelPicker.classList.add("is-open");
+}
+
 async function loadOpenRouterModels(query = "") {
   if (modelSearchAbortController) {
     modelSearchAbortController.abort();
@@ -343,6 +366,10 @@ async function loadOpenRouterModels(query = "") {
     throw new Error("Unable to load OpenRouter models.");
   }
   const payload = await response.json();
+  if (query) {
+    setSearchedOpenRouterModels(payload.models || [], query);
+    return;
+  }
   setOpenRouterModels(payload.models || []);
 }
 
@@ -350,11 +377,22 @@ function scheduleModelSearch() {
   if (!modelInput) {
     return;
   }
-  renderModelPicker(filterModels(modelInput.value));
+  const query = modelInput.value.trim();
+  const localMatches = filterModels(query);
+  if (query && !localMatches.length) {
+    renderModelPickerMessage("Searching OpenRouter models...");
+  } else {
+    renderModelPicker(localMatches);
+  }
   window.clearTimeout(scheduleModelSearch.timer);
   scheduleModelSearch.timer = window.setTimeout(() => {
-    loadOpenRouterModels(modelInput.value.trim()).catch(() => {
-      // Keep local/cached options if the OpenRouter model list cannot be refreshed.
+    loadOpenRouterModels(query).catch((error) => {
+      if (error?.name === "AbortError") {
+        return;
+      }
+      if (query && !localMatches.length) {
+        renderModelPickerMessage("Unable to refresh OpenRouter models. Try again in a moment.");
+      }
     });
   }, 180);
 }
