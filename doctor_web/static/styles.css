@@ -333,6 +333,7 @@ a {
    Form Elements
    ============================================================ */
 .field {
+  position: relative;
   display: grid;
   gap: var(--space-2);
   margin-top: var(--space-4);
@@ -1307,6 +1308,8 @@ input[type="text"]:focus {
 
 .model-picker {
   display: none;
+  position: relative;
+  z-index: 20;
   max-height: 340px;
   overflow: auto;
   margin-top: var(--space-2);

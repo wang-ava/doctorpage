@@ -4,7 +4,6 @@ const apiKeyStatus = document.getElementById("apiKeyStatus");
 const modelInput = document.getElementById("modelInput");
 const modelStatus = document.getElementById("modelStatus");
 const modelNote = document.getElementById("modelNote");
-const modelSuggestions = document.getElementById("modelSuggestions");
 const modelPicker = document.getElementById("modelPicker");
 const imageInput = document.getElementById("imageInput");
 const imagePickerButton = document.getElementById("imagePickerButton");
@@ -203,9 +202,6 @@ function getSelectedModelValue() {
 }
 
 function populateModelSuggestions(models = []) {
-  if (!modelSuggestions) {
-    return;
-  }
   const values = Array.from(
     new Set(
       [defaultModelName, ...(models || [])]
@@ -213,13 +209,7 @@ function populateModelSuggestions(models = []) {
         .filter(Boolean)
     )
   );
-  modelSuggestions.replaceChildren(
-    ...values.map((value) => {
-      const option = document.createElement("option");
-      option.value = value;
-      return option;
-    })
-  );
+  modelInput?.setAttribute("data-model-count", String(values.length));
 }
 
 function normalizeModelOption(model) {
@@ -264,6 +254,11 @@ function setSearchedOpenRouterModels(models = [], query = "") {
   searchedOpenRouterModels = (models || []).map(normalizeModelOption).filter((model) => model.id);
   setOpenRouterModels(searchedOpenRouterModels);
   renderModelPicker(filterModels(query, searchedOpenRouterModels));
+  if (modelStatus && query) {
+    modelStatus.textContent = searchedOpenRouterModels.length
+      ? `${searchedOpenRouterModels.length} models found`
+      : "No matching models";
+  }
 }
 
 function filterModels(query, preferredSource = null) {
@@ -353,6 +348,9 @@ function renderModelPickerMessage(message) {
   item.textContent = message;
   modelPicker.appendChild(item);
   modelPicker.classList.add("is-open");
+  if (modelStatus) {
+    modelStatus.textContent = message;
+  }
 }
 
 async function loadOpenRouterModels(query = "") {
@@ -383,6 +381,9 @@ function scheduleModelSearch() {
     renderModelPickerMessage("Searching OpenRouter models...");
   } else {
     renderModelPicker(localMatches);
+    if (modelStatus && query) {
+      modelStatus.textContent = localMatches.length ? `${localMatches.length} local matches` : "Searching models...";
+    }
   }
   window.clearTimeout(scheduleModelSearch.timer);
   scheduleModelSearch.timer = window.setTimeout(() => {
